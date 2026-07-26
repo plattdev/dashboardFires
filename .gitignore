@@ -1,0 +1,16 @@
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# Python byte-code & cache
+__pycache__/
+*.pyc
+
+# Streamlit config / secrets if sensitive
+# .streamlit/secrets.toml
+
+# OS & Editor files
+.DS_Store
+.vscode/
+.idea/
