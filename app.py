@@ -2,11 +2,19 @@
 import streamlit as st
 import pandas as pd
 
-# 1. PAGE SETUP
-# This configures the browser tab title and makes the dashboard take up the full screen width.
+# 1. PAGE SETUP & STYLING
 st.set_page_config(page_title="European Wildfire Tracker", layout="wide")
 
+def load_css(file_path: str):
+    """Utility function to load external CSS files into Streamlit."""
+    with open(file_path, "r", encoding="utf-8") as f:
+        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
+
+# Load external custom styles
+load_css("css/styles.css")
+
 st.title("Live European Wildfire Tracker")
+
 # st.write("Displaying active fire anomalies detected by NASA satellites over the last 24 hours.")
 
 # 2. DATA FETCHING (The Backend)
@@ -81,23 +89,3 @@ with col2:
     # Streamlit has a built-in map function that reads 'latitude' and 'longitude' columns
     # and automatically plots them on a dark-themed map.
     st.map(high_confidence_fires)
-
-st.markdown(
-    """
-    <style>
-        /* Outermost page margins */
-        .main .block-container {
-            padding-top: 0;
-            padding-bottom: 0;
-            padding-left: 0;
-            padding-right: 0;
-            max-width: 100%;
-        }
-        /* Spacing between vertical blocks */
-        div[data-testid="stVerticalBlock"] > div {
-            gap: 0.1rem;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
