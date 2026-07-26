@@ -141,7 +141,10 @@ with col2:
         spain_df,
         get_position="[longitude, latitude]",
         get_color="color_rgba",
-        get_radius=3000,
+        # en metros:
+        get_radius=1000, 
+        radius_min_pixels=4,
+        radius_max_pixels=8,
         pickable=True,
         opacity=0.8,
         filled=True,
