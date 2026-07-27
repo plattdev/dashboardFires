@@ -1,13 +1,15 @@
 """
 European Wildfire Tracker — NASA FIRMS
-=======================================
+======================================
 Streamlit dashboard that visualises active fire detections across Spain
 using NASA FIRMS satellite data (VIIRS) and overlays Spanish protected
-natural areas (ENP) from MITECO GeoParquet files.
+natural areas (ENP) from MITECO GeoParquet files. It also integrates a
+100 m population raster from WorldPop to compute fire-exposure KPIs.
 
 Data sources:
 - NASA FIRMS NRT & SP VIIRS feeds (CSV via API)
 - MITECO ENP boundaries (GeoParquet, EPSG:32628 / EPSG:32630)
+- WorldPop Population Grid 100 m (GeoTIFF, EPSG:4326, CC BY 4.0 / ODbL)
 """
 
 from __future__ import annotations
@@ -20,6 +22,8 @@ import geopandas as gpd
 import numpy as np
 import pandas as pd
 import pydeck as pdk
+import rasterio
+from rasterio.enums import Resampling
 import streamlit as st
 from shapely.geometry import Point
 
@@ -41,6 +45,9 @@ _inject_css(Path("css/styles.css"))
 # ---------------------------------------------------------------------------
 
 DATA_DIR = Path("data")
+POPULATION_TIFF = DATA_DIR / "SpainPopulation2026_CN_100m_R2025A_v1.tif"
+_POP_DOWNSAMPLE_FACTOR = 10  # 100 m → ~1 km
+_POP_DENSITY_THRESHOLD = 10  # hab/pixel threshold for "populated area" KPI
 
 
 @st.cache_resource(show_spinner=False)
@@ -86,6 +93,119 @@ def build_enp_geojson() -> dict | None:
             combined["ODESIGNATE"].fillna("Espacio Protegido") + " — " + combined["SITE_NAME"].fillna("")
         )
     return json.loads(combined.to_json())
+
+
+@st.cache_resource(show_spinner=False)
+def load_population_heatmap_data() -> pd.DataFrame | None:
+    """Load the WorldPop population raster, downsample to ~1 km, and return a
+    DataFrame of ``(lat, lon, population)`` for PyDeck HeatmapLayer.
+
+    Uses ``rasterio`` decimated reads so the full 93 MB raster is never held
+    in memory at full resolution.
+    """
+    if not POPULATION_TIFF.exists():
+        return None
+
+    with rasterio.open(POPULATION_TIFF) as src:
+        # Decimated read — resolution goes from 100 m to ~1 km
+        out_shape = (
+            1,
+            src.height // _POP_DOWNSAMPLE_FACTOR,
+            src.width // _POP_DOWNSAMPLE_FACTOR,
+        )
+        data = src.read(
+            1,
+            out_shape=(out_shape[1], out_shape[2]),
+            resampling=Resampling.average,
+        )
+        # Scale average back to sum for the aggregated cell
+        data = data * (_POP_DOWNSAMPLE_FACTOR ** 2)
+        nodata = src.nodata
+        transform = src.transform * src.transform.scale(
+            src.width / data.shape[1],
+            src.height / data.shape[0],
+        )
+
+    # Build coordinate arrays for valid (non-nodata, > 0) cells
+    if nodata is not None:
+        mask = (data != nodata) & (data > 0)
+    else:
+        mask = data > 0
+
+    rows, cols = np.nonzero(mask)
+    xs, ys = rasterio.transform.xy(transform, rows, cols)
+
+    return pd.DataFrame({
+        "lat": np.asarray(ys, dtype=np.float32),
+        "lon": np.asarray(xs, dtype=np.float32),
+        "population": data[rows, cols].astype(np.float32),
+    })
+
+
+@st.cache_resource(show_spinner=False)
+def _open_population_raster() -> rasterio.DatasetReader | None:
+    """Keep the population raster open for point-sampling (shared across reruns)."""
+    if not POPULATION_TIFF.exists():
+        return None
+    return rasterio.open(POPULATION_TIFF)
+
+
+def compute_population_kpis(
+    fires_df: pd.DataFrame,
+) -> dict[str, float | int]:
+    """Compute population-exposure KPIs by sampling the WorldPop raster.
+
+    Returns a dict with keys:
+    - ``exposed_pop``   – estimated people within 5 km of an active fire
+    - ``mean_density``  – average population value at fire-pixel locations
+    - ``fires_in_pop``  – count of fires where pixel population > threshold
+    """
+    result: dict[str, float | int] = {
+        "exposed_pop": 0,
+        "mean_density": 0.0,
+        "fires_in_pop": 0,
+    }
+    src = _open_population_raster()
+    if src is None or fires_df.empty:
+        return result
+
+    coords = list(zip(fires_df["longitude"], fires_df["latitude"]))
+    sampled = np.array(
+        [val[0] for val in src.sample(coords)], dtype=np.float32
+    )
+    # Replace nodata with 0
+    if src.nodata is not None:
+        sampled[sampled == src.nodata] = 0.0
+    sampled[sampled < 0] = 0.0
+
+    result["mean_density"] = float(np.mean(sampled)) if len(sampled) else 0.0
+    result["fires_in_pop"] = int(np.sum(sampled > _POP_DENSITY_THRESHOLD))
+
+    # Exposed population: use the downsampled heatmap data with a
+    # simple distance filter (~5 km ≈ 0.045° at Spain's latitude)
+    pop_df = load_population_heatmap_data()
+    if pop_df is not None and not pop_df.empty:
+        deg_buf = 0.045  # ~5 km
+        total_exposed = 0.0
+        # Vectorised approach: for each fire, find pop cells within buffer
+        fire_lats = fires_df["latitude"].values
+        fire_lons = fires_df["longitude"].values
+        pop_lats = pop_df["lat"].values
+        pop_lons = pop_df["lon"].values
+        pop_vals = pop_df["population"].values
+
+        # Mark population cells that are near ANY fire
+        near_any = np.zeros(len(pop_df), dtype=bool)
+        for i in range(len(fire_lats)):
+            dist_mask = (
+                (np.abs(pop_lats - fire_lats[i]) < deg_buf)
+                & (np.abs(pop_lons - fire_lons[i]) < deg_buf)
+            )
+            near_any |= dist_mask
+        total_exposed = float(pop_vals[near_any].sum())
+        result["exposed_pop"] = int(total_exposed)
+
+    return result
 
 
 @st.cache_data(ttl=3600)
@@ -239,6 +359,13 @@ if not europe_df.empty:
         st.error(f"Error processing ENP spatial layer: {exc}")
         eco_fires = 0
 
+    # Compute population KPIs
+    try:
+        pop_kpis = compute_population_kpis(spain_only_df)
+    except Exception as exc:
+        st.error(f"Error computing population KPIs: {exc}")
+        pop_kpis = {"exposed_pop": 0, "mean_density": 0.0, "fires_in_pop": 0}
+
     with col2:
         st.markdown(
             f"""
@@ -260,11 +387,52 @@ if not europe_df.empty:
             """,
             unsafe_allow_html=True
         )
+
+    # --- Population KPI row ------------------------------------------------
+    pop_col1, pop_col2, pop_col3 = st.columns(3)
+
+    with pop_col1:
+        exposed = pop_kpis["exposed_pop"]
+        exposed_fmt = f"{exposed:,.0f}" if exposed else "—"
+        st.markdown(
+            f"""
+            <div style="background-color: rgba(100, 100, 255, 0.15); padding: 10px; border-radius: 8px; height: 100%; border: 1px solid rgba(100, 100, 255, 0.5);">
+                <p style="margin-top: 0; margin-bottom: 5px; color: #333; font-size: 0.9em; font-weight: 600;">👥 Population Exposed (5 km)</p>
+                <p style="font-size: 1.8em; font-weight: bold; margin-bottom: 0; color: #4a4aff; line-height: 1;">{exposed_fmt}</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with pop_col2:
+        mean_d = pop_kpis["mean_density"]
+        mean_fmt = f"{mean_d:.1f}" if mean_d else "—"
+        st.markdown(
+            f"""
+            <div style="background-color: rgba(150, 80, 200, 0.15); padding: 10px; border-radius: 8px; height: 100%; border: 1px solid rgba(150, 80, 200, 0.5);">
+                <p style="margin-top: 0; margin-bottom: 5px; color: #333; font-size: 0.9em; font-weight: 600;">📊 Mean Pop. Density at Fires</p>
+                <p style="font-size: 1.8em; font-weight: bold; margin-bottom: 0; color: #9650c8; line-height: 1;">{mean_fmt} <span style="font-size: 0.5em;">hab/px</span></p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with pop_col3:
+        fires_pop = pop_kpis["fires_in_pop"]
+        st.markdown(
+            f"""
+            <div style="background-color: rgba(220, 50, 50, 0.15); padding: 10px; border-radius: 8px; height: 100%; border: 1px solid rgba(220, 50, 50, 0.5);">
+                <p style="margin-top: 0; margin-bottom: 5px; color: #333; font-size: 0.9em; font-weight: 600;">🏘️ Fires in Populated Areas (&gt;{_POP_DENSITY_THRESHOLD} hab/px)</p>
+                <p style="font-size: 1.8em; font-weight: bold; margin-bottom: 0; color: #dc3232; line-height: 1;">{fires_pop}</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 else:
     st.warning("No fire data available for the selected date range.")
 
-# --- Legend & Toggle (same row) --------------------------------------------
-leg_col, tog_col = st.columns([2, 1])
+# --- Legend & Toggles (same row) -------------------------------------------
+leg_col, tog_col1, tog_col2 = st.columns([2, 1, 1])
 
 with leg_col:
     st.markdown(
@@ -276,9 +444,11 @@ with leg_col:
         unsafe_allow_html=True,
     )
 
-with tog_col:
-    # Optional ENP overlay
-    show_enp = st.toggle("Show Protected Areas (MITECO, Dec. 2025)", value=False)
+with tog_col1:
+    show_enp = st.toggle("Show Protected Areas (MITECO)", value=False)
+
+with tog_col2:
+    show_pop = st.toggle("Show Population Density (WorldPop)", value=False)
 
 # --- Map -------------------------------------------------------------------
 layers: list[pdk.Layer] = []
@@ -317,10 +487,42 @@ if show_enp:
     else:
         st.warning("ENP data not found in the data/ folder.")
 
+if show_pop:
+    pop_df = load_population_heatmap_data()
+    if pop_df is not None and not pop_df.empty:
+        layers.insert(
+            0,  # render below fire points
+            pdk.Layer(
+                "HeatmapLayer",
+                data=pop_df,
+                get_position="[lon, lat]",
+                get_weight="population",
+                radiusPixels=35,
+                intensity=1,
+                threshold=0.05,
+                opacity=0.6,
+                color_range=[
+                    [0, 0, 128],       # dark blue  – low
+                    [0, 128, 255],     # sky blue
+                    [0, 255, 128],     # cyan-green
+                    [255, 255, 0],     # yellow
+                    [255, 128, 0],     # orange
+                    [255, 0, 0],       # red        – high
+                ],
+            ),
+        )
+    else:
+        st.warning("Population raster not found in data/ folder.")
+
 st.pydeck_chart(
     pdk.Deck(
         layers=layers,
         initial_view_state=pdk.ViewState(latitude=40.0, longitude=-3.0, zoom=5, pitch=0),
         tooltip={"html": "{tooltip_text}", "style": {"backgroundColor": "steelblue", "color": "white"}},
     )
+)
+
+st.caption(
+    "Data sources: NASA FIRMS (VIIRS) | MITECO (Protected Natural Areas) | "
+    "[WorldPop](https://www.worldpop.org/) Population Data ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) / [ODbL](https://opendatacommons.org/licenses/odbl/))"
 )
