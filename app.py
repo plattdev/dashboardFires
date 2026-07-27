@@ -1,302 +1,292 @@
-import streamlit as st
+"""
+European Wildfire Tracker — NASA FIRMS
+=======================================
+Streamlit dashboard that visualises active fire detections across Spain
+using NASA FIRMS satellite data (VIIRS) and overlays Spanish protected
+natural areas (ENP) from MITECO GeoParquet files.
+
+Data sources:
+- NASA FIRMS NRT & SP VIIRS feeds (CSV via API)
+- MITECO ENP boundaries (GeoParquet, EPSG:32628 / EPSG:32630)
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+from pathlib import Path
+
+import geopandas as gpd
+import numpy as np
 import pandas as pd
 import pydeck as pdk
-import datetime
-import os
-import json
-try:
-    import geopandas as gpd
-    from shapely.geometry import Point
-except ImportError:
-    gpd = None
+import streamlit as st
+from shapely.geometry import Point
 
-# --- GLOBAL DATA LOADERS ---
-@st.cache_resource(show_spinner=False)
-def load_enp_data():
-    enp_c_path = "data/Enp2025_c.parquet"
-    enp_p_path = "data/Enp2025_p.parquet"
-    enp_gdfs = {}
-    if gpd is not None:
-        if os.path.exists(enp_c_path):
-            enp_gdfs['canarias'] = gpd.read_parquet(enp_c_path)
-        if os.path.exists(enp_p_path):
-            enp_gdfs['peninsula'] = gpd.read_parquet(enp_p_path)
-    return enp_gdfs
-
-@st.cache_data(show_spinner=False)
-def get_simplified_enp_geojson():
-    enp_gdfs = load_enp_data()
-    if not enp_gdfs:
-        return None
-        
-    gdfs_to_concat = []
-    if 'canarias' in enp_gdfs:
-        # Simplify in its metric projection (150m tolerance) and convert to WGS84 for Pydeck
-        c_sim = enp_gdfs['canarias'].copy()
-        c_sim['geometry'] = c_sim['geometry'].simplify(150)
-        gdfs_to_concat.append(c_sim.to_crs(epsg=4326))
-        
-    if 'peninsula' in enp_gdfs:
-        p_sim = enp_gdfs['peninsula'].copy()
-        p_sim['geometry'] = p_sim['geometry'].simplify(150)
-        gdfs_to_concat.append(p_sim.to_crs(epsg=4326))
-        
-    if not gdfs_to_concat:
-        return None
-        
-    combined = pd.concat(gdfs_to_concat, ignore_index=True)
-    if isinstance(combined, pd.DataFrame) and not isinstance(combined, gpd.GeoDataFrame):
-        combined = gpd.GeoDataFrame(combined, geometry='geometry', crs="EPSG:4326")
-        
-    # Agregamos la columna de tooltip para Pydeck sin tags HTML
-    if 'SITE_NAME' in combined.columns and 'ODESIGNATE' in combined.columns:
-        combined['tooltip_text'] = combined['ODESIGNATE'].fillna("Espacio Protegido") + " - " + combined['SITE_NAME'].fillna("")
-        
-    return json.loads(combined.to_json())
-
-# 1. PAGE SETUP & STYLING
+# ---------------------------------------------------------------------------
+# 1. PAGE CONFIG & STYLING
+# ---------------------------------------------------------------------------
 st.set_page_config(page_title="European Wildfire Tracker", layout="wide")
 
-def load_css(file_path: str):
-    """Utility function to load external CSS files into Streamlit."""
-    with open(file_path, "r", encoding="utf-8") as f:
-        st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
-# Load external custom styles
-load_css("css/styles.css")
-
-st.title("European Wildfire Tracker - NASA FIRMS")
-
-# st.write("Displaying active fire anomalies detected by NASA satellites over the last 24 hours.")
-
-# 2. DATA FETCHING (The Backend)
-# The @st.cache_data(ttl=3600) decorator tells Streamlit to remember this data for 1 hour,
-# so it doesn't redownload the CSV on every click, but still updates hourly with live NRT data.
-@st.cache_data(ttl=3600)
-def load_data():
-    # This URL points directly to NASA's live 24-hour fire data for Europe
-    url = "https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-viirs-c2/csv/J1_VIIRS_C2_Europe_24h.csv"
-    
-    # Pandas reads the CSV from the internet just like a local file
-    data = pd.read_csv(url)
-    
-    # We rename the 'bright_ti4' column (VIIRS brightness temperature) to something readable
-    data = data.rename(columns={"bright_ti4": "Brightness_Temperature"})
-    return data
-
-# Load the data into a variable called DataFrame 'df'
-df = load_data()
-
-# 3. DATA PROCESSING
-# NASA gives us a 'confidence' column (low, nominal, high). 
-# We only want to show fires the satellite is confident about.
-high_confidence_fires = df[df['confidence'].isin(['nominal', 'high'])]
-
-# 4. THE DASHBOARD UI - CONTEXT & KPIS
-st.subheader("Which population centers & areas of high ecological value are at risk?")
-
-top_col1, top_col2, top_col3 = st.columns([4, 1, 1])
-
-with top_col1:
-    st.info(
-        "**Context:** Recent scientific studies indicate that the frequency and intensity of wildfires in Europe "
-        "have increased significantly. This trend is primarily driven by **global warming**, which exacerbates summer "
-        "droughts, combined with the widespread **abandonment of traditional herding** and rural "
-        "land management. Without grazing, there is a dangerous accumulation of unmanaged, highly flammable biomass."
-    )
-
-with top_col2:
-    # Estimating coherent ranges based on the live data (since we don't have geospatial population/eco boundaries in this raw CSV)
-    total_fires = len(high_confidence_fires)
-    est_pop_fires = int(total_fires * 0.15)  # Coherent estimate: ~15% near populations
-    
-    st.metric("🔥 Fires < 5km from Population", value=f"{est_pop_fires} - {est_pop_fires + 15}")
+def _inject_css(path: Path) -> None:
+    """Read a CSS file and inject it into the Streamlit page."""
+    st.markdown(f"<style>{path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
 
 
-with top_col3:
-    # Best Practices 2026: Use GeoParquet for extreme performance and handle CRSs independently for accuracy.
-    enp_gdfs = load_enp_data()
+_inject_css(Path("css/styles.css"))
 
-    if gpd is not None and enp_gdfs:
-        try:
-            # Convert active fires to a base GeoDataFrame (WGS84)
-            geometry = [Point(xy) for xy in zip(high_confidence_fires['longitude'], high_confidence_fires['latitude'])]
-            fires_gdf_base = gpd.GeoDataFrame(high_confidence_fires, geometry=geometry, crs="EPSG:4326")
-            
-            near_fire_indices = set()
-            
-            # Intersect with Canary Islands (Projected to UTM Zone 28N)
-            if 'canarias' in enp_gdfs:
-                fires_c = fires_gdf_base.to_crs(enp_gdfs['canarias'].crs)
-                fires_near_c = gpd.sjoin_nearest(fires_c, enp_gdfs['canarias'], max_distance=5000)
-                near_fire_indices.update(fires_near_c.index.tolist())
-                
-            # Intersect with Peninsula (Projected to UTM Zone 30N)
-            if 'peninsula' in enp_gdfs:
-                fires_p = fires_gdf_base.to_crs(enp_gdfs['peninsula'].crs)
-                fires_near_p = gpd.sjoin_nearest(fires_p, enp_gdfs['peninsula'], max_distance=5000)
-                near_fire_indices.update(fires_near_p.index.tolist())
-                
-            est_eco_fires = len(near_fire_indices)
-        except Exception as e:
-            st.error(f"Error procesando la capa espacial ENP: {e}")
-            est_eco_fires = int(total_fires * 0.30)
-    else:
-        est_eco_fires = int(total_fires * 0.30)  # Fallback estimate: ~30% near ecological areas
-    
-    st.metric("🌲 Fires < 5km from Ecological Zones", value=f"{est_eco_fires} - {est_eco_fires + 25}")
+# ---------------------------------------------------------------------------
+# 2. CACHED DATA LOADERS (top-level, as per Streamlit best practices)
+# ---------------------------------------------------------------------------
 
-# To add a subtle horizontal line
-# st.divider()
+DATA_DIR = Path("data")
 
-# 5. THE DASHBOARD UI (The Frontend)
-# Create two columns on the screen so it looks professional
-col1, col2 = st.columns([1, 3]) # Column 2 is 3 times wider than Column 1
 
-with col1:
-    st.subheader("Data Overview")
-    st.write(f"**Total fires detected:** {len(df)}")
-    st.write(f"**High confidence fires:** {len(high_confidence_fires)}")
-    
-    # Show the raw data in a table so clients can see the numbers behind the map
-    st.write("Raw Satellite Data (First 100 rows):")
-    st.dataframe(high_confidence_fires[['latitude', 'longitude', 'acq_time', 'Brightness_Temperature']].head(100))
+@st.cache_resource(show_spinner=False)
+def load_enp_geodataframes() -> dict[str, gpd.GeoDataFrame]:
+    """Load ENP (Espacios Naturales Protegidos) GeoParquet files.
 
-with col2:
-    st.subheader("Spain Wildfires (Last 7 Days) - Time Since Detection")
-    st.markdown(
-        """
-        **Legend:** 
-        <span style="color:#8B0000">⬤</span> &le; 24h | 
-        <span style="color:#FF0000">⬤</span> 24-48h | 
-        <span style="color:#FFA500">⬤</span> 2-4 days | 
-        <span style="color:#FFFF00">⬤</span> > 4 days
-        """, 
-        unsafe_allow_html=True
-    )
-    
-    # --- HISTORICAL DATA UI ---
-    st.success("API Key cargada: Modo Histórico Activado")
-    col2_a, col2_b = st.columns(2)
-    with col2_a:
-        selected_date = st.date_input("Selecciona la fecha final:", datetime.date.today())
-    with col2_b:
-        selected_range = st.slider("Días a visualizar hacia atrás:", min_value=1, max_value=5, value=5)
-        
-    @st.cache_data(ttl=3600)
-    def get_historical_spain_data(api_key, date_str, days, source):
-        # The Area API URL format: /api/area/csv/[MAP_KEY]/[SOURCE]/[AREA]/[DAY_RANGE]/[DATE]
-        # Bounding box for Spain: -9.5,35.5,4.5,44.0
-        url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/{source}/-9.5,35.5,4.5,44.0/{days}/{date_str}"
-        try:
-            data = pd.read_csv(url)
-        except Exception as e:
-            st.error(f"Error conectando con la API de NASA FIRMS: {e}")
-            return pd.DataFrame()
-            
-        if data.empty or 'confidence' not in data.columns:
-            return pd.DataFrame()
-        
-        # Filter for nominal/high confidence (API uses 'n', 'h')
-        data = data[data['confidence'].isin(['nominal', 'high', 'n', 'h'])]
-        return data
+    Returns a dict keyed by region name ('canarias', 'peninsula') with the
+    GeoDataFrames in their original projected CRS (UTM 28N / 30N).
+    """
+    result: dict[str, gpd.GeoDataFrame] = {}
+    for key, filename in [("canarias", "Enp2025_c.parquet"), ("peninsula", "Enp2025_p.parquet")]:
+        path = DATA_DIR / filename
+        if path.exists():
+            result[key] = gpd.read_parquet(path)
+    return result
 
-    # Calculate the start date for the API request. 
-    # FIRMS Area API expects [START_DATE] and [DAY_RANGE] (number of days going forward).
-    start_date = selected_date - datetime.timedelta(days=selected_range - 1)
-    
-    # Decide the dataset source depending on the selected date
-    # NRT (Near Real-Time) is only available for recent days.
-    # SP (Standard Processing) is available for historical data (e.g., 2025).
-    days_diff = (datetime.date.today() - selected_date).days
-    source = "VIIRS_SNPP_SP" if days_diff > 30 else "VIIRS_SNPP_NRT"
 
-    # Fetch data directly with the API
-    raw_spain_data = get_historical_spain_data(
-        st.secrets["FIRMS_API_KEY"], 
-        start_date.strftime("%Y-%m-%d"), 
-        selected_range,
-        source
-    )
-        
-    if not raw_spain_data.empty:
-        # Parse datetime to calculate time since detection
-        raw_spain_data['acq_datetime'] = pd.to_datetime(raw_spain_data['acq_date'] + ' ' + raw_spain_data['acq_time'].astype(str).str.zfill(4), format='%Y-%m-%d %H%M')
-        
-        # Agregamos la columna de tooltip unificada para Pydeck sin tags HTML
-        raw_spain_data['tooltip_text'] = (
-            "Detección de Incendio - " +
-            "Fecha: " + raw_spain_data['acq_datetime'].dt.strftime('%Y-%m-%d %H:%M') + " - " +
-            "Confianza: " + raw_spain_data['confidence'].astype(str)
+@st.cache_data(show_spinner=False)
+def build_enp_geojson() -> dict | None:
+    """Simplify ENP geometries and return a GeoJSON dict in WGS-84 for PyDeck.
+
+    Simplification uses a 150 m tolerance in the native metric projection
+    before reprojecting to EPSG:4326.
+    """
+    enp_gdfs = load_enp_geodataframes()
+    if not enp_gdfs:
+        return None
+
+    parts: list[gpd.GeoDataFrame] = []
+    for gdf in enp_gdfs.values():
+        simplified = gdf.copy()
+        simplified["geometry"] = simplified["geometry"].simplify(150)
+        parts.append(simplified.to_crs(epsg=4326))
+
+    if not parts:
+        return None
+
+    combined = gpd.GeoDataFrame(pd.concat(parts, ignore_index=True), geometry="geometry", crs="EPSG:4326")
+
+    # Tooltip column for PyDeck (plain text, no HTML)
+    if {"SITE_NAME", "ODESIGNATE"}.issubset(combined.columns):
+        combined["tooltip_text"] = (
+            combined["ODESIGNATE"].fillna("Espacio Protegido") + " — " + combined["SITE_NAME"].fillna("")
         )
-        
-        dt_max = raw_spain_data['acq_datetime'].max()
-        
-        def get_color(row):
-            diff = dt_max - row['acq_datetime']
-            if diff <= pd.Timedelta(hours=24):
-                return [139, 0, 0, 200]    # Dark Red
-            elif diff <= pd.Timedelta(days=2):
-                return [255, 0, 0, 200]    # Red
-            elif diff <= pd.Timedelta(days=4):
-                return [255, 165, 0, 200]  # Orange
-            else:
-                return [255, 255, 0, 200]  # Yellow
-                
-        raw_spain_data['color_rgba'] = raw_spain_data.apply(get_color, axis=1)
-    
-    spain_df = raw_spain_data
-    
-    # Use PyDeck for a premium, dynamic interactive map with tooltips
-    layers = []
-    
-    # 1. Fire Layer (Bottom)
-    fire_layer = pdk.Layer(
-        "ScatterplotLayer",
-        spain_df,
-        get_position="[longitude, latitude]",
-        get_color="color_rgba",
-        get_radius=1000, 
-        radius_min_pixels=4,
-        radius_max_pixels=8,
-        pickable=True,
-        opacity=0.8,
-        filled=True,
+    return json.loads(combined.to_json())
+
+
+@st.cache_data(ttl=3600)
+def fetch_spain_fires(api_key: str, start_date: str, day_range: int, source: str) -> pd.DataFrame:
+    """Fetch VIIRS fire detections for Spain from the NASA FIRMS Area API.
+
+    Parameters
+    ----------
+    api_key : str
+        NASA FIRMS MAP_KEY.
+    start_date : str
+        ISO date string (YYYY-MM-DD) for the start of the query window.
+    day_range : int
+        Number of days forward from *start_date*.
+    source : str
+        FIRMS dataset identifier (e.g. ``VIIRS_SNPP_NRT`` or ``VIIRS_SNPP_SP``).
+
+    Returns
+    -------
+    pd.DataFrame
+        Filtered to nominal/high confidence detections. Empty DataFrame on error.
+    """
+    # Bounding box for Spain (lon_min, lat_min, lon_max, lat_max)
+    bbox = "-9.5,35.5,4.5,44.0"
+    url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/{source}/{bbox}/{day_range}/{start_date}"
+    try:
+        data = pd.read_csv(url)
+    except Exception as exc:
+        st.error(f"Error connecting to NASA FIRMS API: {exc}")
+        return pd.DataFrame()
+
+    if data.empty or "confidence" not in data.columns:
+        return pd.DataFrame()
+
+    # FIRMS API returns 'n'/'h' for NRT and 'nominal'/'high' for SP
+    return data[data["confidence"].isin(["nominal", "high", "n", "h"])]
+
+
+def compute_eco_fires(fires_df: pd.DataFrame) -> int:
+    """Count fires within 5 km of a Spanish protected natural area (ENP).
+
+    Uses projected CRS spatial joins for accuracy (UTM 28N for Canarias,
+    UTM 30N for the peninsula).
+    """
+    enp_gdfs = load_enp_geodataframes()
+    if not enp_gdfs or fires_df.empty:
+        return 0
+
+    geometry = [Point(xy) for xy in zip(fires_df["longitude"], fires_df["latitude"])]
+    fires_gdf = gpd.GeoDataFrame(fires_df, geometry=geometry, crs="EPSG:4326")
+
+    near_indices: set[int] = set()
+    for enp_gdf in enp_gdfs.values():
+        fires_projected = fires_gdf.to_crs(enp_gdf.crs)
+        joined = gpd.sjoin_nearest(fires_projected, enp_gdf, max_distance=5000)
+        near_indices.update(joined.index.tolist())
+
+    return len(near_indices)
+
+
+# ---------------------------------------------------------------------------
+# Vectorised color assignment helpers
+# ---------------------------------------------------------------------------
+
+# Time-based color thresholds (most recent → oldest)
+_COLOR_BINS = [
+    (pd.Timedelta(hours=24), [139, 0, 0, 200]),   # Dark Red  — ≤ 24 h
+    (pd.Timedelta(days=2),   [255, 0, 0, 200]),    # Red       — 24–48 h
+    (pd.Timedelta(days=4),   [255, 165, 0, 200]),  # Orange    — 2–4 days
+]
+_DEFAULT_COLOR = [255, 255, 0, 200]                 # Yellow    — > 4 days
+
+
+def assign_colors(df: pd.DataFrame) -> pd.DataFrame:
+    """Add a ``color_rgba`` column based on time since the most recent detection.
+
+    Uses ``np.select`` for vectorised performance instead of row-wise ``apply``.
+    """
+    dt_max = df["acq_datetime"].max()
+    diff = dt_max - df["acq_datetime"]
+
+    conditions = [diff <= threshold for threshold, _ in _COLOR_BINS]
+    choices = [color for _, color in _COLOR_BINS]
+
+    indices = np.select(conditions, range(len(choices)), default=len(choices))
+    all_colors = choices + [_DEFAULT_COLOR]
+    df["color_rgba"] = [all_colors[int(i)] for i in indices]
+    return df
+
+
+# ---------------------------------------------------------------------------
+# 3. DASHBOARD LAYOUT
+# ---------------------------------------------------------------------------
+
+st.title("European Wildfire Tracker — NASA FIRMS")
+st.subheader("Spain — Active Fire Detections")
+
+# --- Date controls ---------------------------------------------------------
+ctrl_col1, ctrl_col2 = st.columns(2)
+with ctrl_col1:
+    selected_date = st.date_input("End date:", datetime.date.today())
+with ctrl_col2:
+    selected_range = st.slider("Days to look back:", min_value=1, max_value=5, value=5)
+
+# Determine FIRMS dataset source: SP for data older than 30 days, NRT otherwise
+start_date = selected_date - datetime.timedelta(days=selected_range - 1)
+days_from_today = (datetime.date.today() - selected_date).days
+source = "VIIRS_SNPP_SP" if days_from_today > 30 else "VIIRS_SNPP_NRT"
+
+spain_df = fetch_spain_fires(
+    st.secrets["FIRMS_API_KEY"],
+    start_date.strftime("%Y-%m-%d"),
+    selected_range,
+    source,
+)
+
+# --- KPI row ---------------------------------------------------------------
+if not spain_df.empty:
+    # Parse acquisition datetime
+    spain_df["acq_datetime"] = pd.to_datetime(
+        spain_df["acq_date"] + " " + spain_df["acq_time"].astype(str).str.zfill(4),
+        format="%Y-%m-%d %H%M",
     )
-    layers.append(fire_layer)
-    
-    # 2. Optional ENP Layer (Top)
-    show_enp = st.toggle("Protected Areas(MITECO, Dec. 2025)", value=False)
-    if show_enp:
-        enp_geojson = get_simplified_enp_geojson()
-        if enp_geojson:
-            enp_layer = pdk.Layer(
+
+    # Plain-text tooltip for PyDeck
+    spain_df["tooltip_text"] = (
+        "Fire Detection — Date: "
+        + spain_df["acq_datetime"].dt.strftime("%Y-%m-%d %H:%M")
+        + " — Confidence: "
+        + spain_df["confidence"].astype(str)
+    )
+
+    spain_df = assign_colors(spain_df)
+
+    # Compute KPIs
+    total_fires = len(spain_df)
+    try:
+        eco_fires = compute_eco_fires(spain_df)
+    except Exception as exc:
+        st.error(f"Error processing ENP spatial layer: {exc}")
+        eco_fires = 0
+
+    kpi1, kpi2 = st.columns(2)
+    kpi1.metric("🔥 Total High-Confidence Fires", value=total_fires)
+    kpi2.metric("🌲 Fires < 5 km from Protected Areas", value=eco_fires)
+else:
+    st.warning("No fire data available for the selected date range.")
+
+# --- Legend ----------------------------------------------------------------
+st.markdown(
+    "**Legend:** "
+    '<span style="color:#8B0000">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
+    '<span style="color:#FF0000">⬤</span> 24–48 h &nbsp;|&nbsp; '
+    '<span style="color:#FFA500">⬤</span> 2–4 days &nbsp;|&nbsp; '
+    '<span style="color:#FFFF00">⬤</span> > 4 days',
+    unsafe_allow_html=True,
+)
+
+# --- Map -------------------------------------------------------------------
+layers: list[pdk.Layer] = []
+
+if not spain_df.empty:
+    layers.append(
+        pdk.Layer(
+            "ScatterplotLayer",
+            data=spain_df,
+            get_position="[longitude, latitude]",
+            get_color="color_rgba",
+            get_radius=1000,
+            radius_min_pixels=4,
+            radius_max_pixels=8,
+            pickable=True,
+            opacity=0.8,
+            filled=True,
+        )
+    )
+
+# Optional ENP overlay
+show_enp = st.toggle("Show Protected Areas (MITECO, Dec. 2025)", value=False)
+if show_enp:
+    enp_geojson = build_enp_geojson()
+    if enp_geojson:
+        layers.append(
+            pdk.Layer(
                 "GeoJsonLayer",
                 data=enp_geojson,
                 pickable=True,
                 stroked=True,
                 filled=True,
-                get_fill_color="[34, 139, 34, 40]",  # Transparent Green
-                get_line_color="[34, 139, 34, 255]", # Solid Green border
+                get_fill_color="[34, 139, 34, 40]",
+                get_line_color="[34, 139, 34, 255]",
                 line_width_min_pixels=1,
             )
-            layers.append(enp_layer)
-        else:
-            st.warning("No se encontraron los datos ENP en la carpeta data/.")
+        )
+    else:
+        st.warning("ENP data not found in the data/ folder.")
 
-    
-    view_state = pdk.ViewState(
-        latitude=40.0,
-        longitude=-3.0,
-        zoom=5,
-        pitch=0
-    )
-    
-    st.pydeck_chart(pdk.Deck(
+st.pydeck_chart(
+    pdk.Deck(
         layers=layers,
-        initial_view_state=view_state,
-        tooltip={
-            "html": "{tooltip_text}",
-            "style": {"backgroundColor": "steelblue", "color": "white"}
-        }
-    ))
+        initial_view_state=pdk.ViewState(latitude=40.0, longitude=-3.0, zoom=5, pitch=0),
+        tooltip={"html": "{tooltip_text}", "style": {"backgroundColor": "steelblue", "color": "white"}},
+    )
+)

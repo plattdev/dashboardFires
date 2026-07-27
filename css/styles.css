@@ -1,13 +1,10 @@
-@import url("reset.css");
-@import url("normalize.css");
-
-/* Hide only the Deploy button while keeping the 3-dots menu & dark/light theme toggle */
+/* Hide the Deploy button while keeping the 3-dots menu & dark/light theme toggle */
 [data-testid="stAppDeployButton"],
 .stAppDeployButton {
     display: none !important;
 }
 
-/* Outermost page container - reduce topmost whitespace */
+/* Outermost page container — reduce topmost whitespace */
 .main .block-container,
 [data-testid="stMainBlockContainer"],
 .stMainBlockContainer {
