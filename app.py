@@ -89,8 +89,8 @@ def build_enp_geojson() -> dict | None:
 
 
 @st.cache_data(ttl=3600)
-def fetch_spain_fires(api_key: str, start_date: str, day_range: int, source: str) -> pd.DataFrame:
-    """Fetch VIIRS fire detections for Spain from the NASA FIRMS Area API.
+def fetch_europe_fires(api_key: str, start_date: str, day_range: int, source: str) -> pd.DataFrame:
+    """Fetch VIIRS fire detections for Europe from the NASA FIRMS Area API.
 
     Parameters
     ----------
@@ -108,8 +108,8 @@ def fetch_spain_fires(api_key: str, start_date: str, day_range: int, source: str
     pd.DataFrame
         Filtered to nominal/high confidence detections. Empty DataFrame on error.
     """
-    # Bounding box for Spain (lon_min, lat_min, lon_max, lat_max)
-    bbox = "-9.5,35.5,4.5,44.0"
+    # Bounding box for Europe, Mediterranean, and North Africa (lon_min, lat_min, lon_max, lat_max)
+    bbox = "-20.0,25.0,35.0,65.0"
     url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/{source}/{bbox}/{day_range}/{start_date}"
     try:
         data = pd.read_csv(url)
@@ -183,11 +183,11 @@ def assign_colors(df: pd.DataFrame) -> pd.DataFrame:
 st.title("European Wildfire Tracker — NASA FIRMS")
 st.subheader("Spain — Active Fire Detections")
 
-# --- Date controls ---------------------------------------------------------
-ctrl_col1, ctrl_col2 = st.columns(2)
-with ctrl_col1:
+# --- Top Row: Controls & KPIs ----------------------------------------------
+col1, col2, col3 = st.columns(3)
+
+with col1:
     selected_date = st.date_input("End date:", datetime.date.today())
-with ctrl_col2:
     selected_range = st.slider("Days to look back:", min_value=1, max_value=5, value=5)
 
 # Determine FIRMS dataset source: SP for data older than 30 days, NRT otherwise
@@ -195,7 +195,7 @@ start_date = selected_date - datetime.timedelta(days=selected_range - 1)
 days_from_today = (datetime.date.today() - selected_date).days
 source = "VIIRS_SNPP_SP" if days_from_today > 30 else "VIIRS_SNPP_NRT"
 
-spain_df = fetch_spain_fires(
+europe_df = fetch_europe_fires(
     st.secrets["FIRMS_API_KEY"],
     start_date.strftime("%Y-%m-%d"),
     selected_range,
@@ -203,55 +203,91 @@ spain_df = fetch_spain_fires(
 )
 
 # --- KPI row ---------------------------------------------------------------
-if not spain_df.empty:
+
+if not europe_df.empty:
     # Parse acquisition datetime
-    spain_df["acq_datetime"] = pd.to_datetime(
-        spain_df["acq_date"] + " " + spain_df["acq_time"].astype(str).str.zfill(4),
+    europe_df["acq_datetime"] = pd.to_datetime(
+        europe_df["acq_date"] + " " + europe_df["acq_time"].astype(str).str.zfill(4),
         format="%Y-%m-%d %H%M",
     )
 
     # Plain-text tooltip for PyDeck
-    spain_df["tooltip_text"] = (
+    europe_df["tooltip_text"] = (
         "Fire Detection — Date: "
-        + spain_df["acq_datetime"].dt.strftime("%Y-%m-%d %H:%M")
+        + europe_df["acq_datetime"].dt.strftime("%Y-%m-%d %H:%M")
         + " — Confidence: "
-        + spain_df["confidence"].astype(str)
+        + europe_df["confidence"].astype(str)
     )
 
-    spain_df = assign_colors(spain_df)
+    europe_df = assign_colors(europe_df)
 
-    # Compute KPIs
-    total_fires = len(spain_df)
+    # Rough bounding box to isolate Spain (excluding North Africa, capturing Canaries and Balearics)
+    # Mainland/Balearics: lat 36.0 to 44.0, lon -9.5 to 4.5
+    # Canary Islands: lat 27.0 to 30.0, lon -19.0 to -13.0
+    spain_mask = (
+        ((europe_df['latitude'] >= 36.0) & (europe_df['latitude'] <= 44.0) & (europe_df['longitude'] >= -9.5) & (europe_df['longitude'] <= 4.5)) |
+        ((europe_df['latitude'] >= 27.0) & (europe_df['latitude'] <= 30.0) & (europe_df['longitude'] >= -19.0) & (europe_df['longitude'] <= -13.0))
+    )
+    spain_only_df = europe_df[spain_mask]
+
+    # Compute KPIs (Only for Spain)
+    total_fires = len(spain_only_df)
     try:
-        eco_fires = compute_eco_fires(spain_df)
+        # compute_eco_fires already filters by distance to Spanish ENP polygons
+        eco_fires = compute_eco_fires(spain_only_df)
     except Exception as exc:
         st.error(f"Error processing ENP spatial layer: {exc}")
         eco_fires = 0
 
-    kpi1, kpi2 = st.columns(2)
-    kpi1.metric("🔥 Total High-Confidence Fires", value=total_fires)
-    kpi2.metric("🌲 Fires < 5 km from Protected Areas", value=eco_fires)
+    with col2:
+        st.markdown(
+            f"""
+            <div style="background-color: rgba(255, 165, 0, 0.2); padding: 10px; border-radius: 8px; height: 100%; border: 1px solid rgba(255, 165, 0, 0.5);">
+                <p style="margin-top: 0; margin-bottom: 5px; color: #333; font-size: 0.9em; font-weight: 600;">Total High-Confidence Fires</p>
+                <p style="font-size: 1.8em; font-weight: bold; margin-bottom: 0; color: #ff8c00; line-height: 1;">{total_fires}</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    with col3:
+        st.markdown(
+            f"""
+            <div style="background-color: rgba(34, 139, 34, 0.2); padding: 10px; border-radius: 8px; height: 100%; border: 1px solid rgba(34, 139, 34, 0.5);">
+                <p style="margin-top: 0; margin-bottom: 5px; color: #333; font-size: 0.9em; font-weight: 600;">Fires < 5 km from Protected Areas</p>
+                <p style="font-size: 1.8em; font-weight: bold; margin-bottom: 0; color: #228b22; line-height: 1;">{eco_fires}</p>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 else:
     st.warning("No fire data available for the selected date range.")
 
-# --- Legend ----------------------------------------------------------------
-st.markdown(
-    "**Legend:** "
-    '<span style="color:#8B0000">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
-    '<span style="color:#FF0000">⬤</span> 24–48 h &nbsp;|&nbsp; '
-    '<span style="color:#FFA500">⬤</span> 2–4 days &nbsp;|&nbsp; '
-    '<span style="color:#FFFF00">⬤</span> > 4 days',
-    unsafe_allow_html=True,
-)
+# --- Legend & Toggle (same row) --------------------------------------------
+leg_col, tog_col = st.columns([2, 1])
+
+with leg_col:
+    st.markdown(
+        "**Legend:** "
+        '<span style="color:#8B0000">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
+        '<span style="color:#FF0000">⬤</span> 24–48 h &nbsp;|&nbsp; '
+        '<span style="color:#FFA500">⬤</span> 2–4 days &nbsp;|&nbsp; '
+        '<span style="color:#FFFF00">⬤</span> > 4 days',
+        unsafe_allow_html=True,
+    )
+
+with tog_col:
+    # Optional ENP overlay
+    show_enp = st.toggle("Show Protected Areas (MITECO, Dec. 2025)", value=False)
 
 # --- Map -------------------------------------------------------------------
 layers: list[pdk.Layer] = []
 
-if not spain_df.empty:
+if not europe_df.empty:
     layers.append(
         pdk.Layer(
             "ScatterplotLayer",
-            data=spain_df,
+            data=europe_df,
             get_position="[longitude, latitude]",
             get_color="color_rgba",
             get_radius=1000,
@@ -263,8 +299,6 @@ if not spain_df.empty:
         )
     )
 
-# Optional ENP overlay
-show_enp = st.toggle("Show Protected Areas (MITECO, Dec. 2025)", value=False)
 if show_enp:
     enp_geojson = build_enp_geojson()
     if enp_geojson:
