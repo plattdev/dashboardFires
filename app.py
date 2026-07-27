@@ -1,7 +1,58 @@
-# The brain of the dashboard
 import streamlit as st
 import pandas as pd
 import pydeck as pdk
+import datetime
+import os
+import json
+try:
+    import geopandas as gpd
+    from shapely.geometry import Point
+except ImportError:
+    gpd = None
+
+# --- GLOBAL DATA LOADERS ---
+@st.cache_resource(show_spinner=False)
+def load_enp_data():
+    enp_c_path = "data/Enp2025_c.parquet"
+    enp_p_path = "data/Enp2025_p.parquet"
+    enp_gdfs = {}
+    if gpd is not None:
+        if os.path.exists(enp_c_path):
+            enp_gdfs['canarias'] = gpd.read_parquet(enp_c_path)
+        if os.path.exists(enp_p_path):
+            enp_gdfs['peninsula'] = gpd.read_parquet(enp_p_path)
+    return enp_gdfs
+
+@st.cache_data(show_spinner=False)
+def get_simplified_enp_geojson():
+    enp_gdfs = load_enp_data()
+    if not enp_gdfs:
+        return None
+        
+    gdfs_to_concat = []
+    if 'canarias' in enp_gdfs:
+        # Simplify in its metric projection (150m tolerance) and convert to WGS84 for Pydeck
+        c_sim = enp_gdfs['canarias'].copy()
+        c_sim['geometry'] = c_sim['geometry'].simplify(150)
+        gdfs_to_concat.append(c_sim.to_crs(epsg=4326))
+        
+    if 'peninsula' in enp_gdfs:
+        p_sim = enp_gdfs['peninsula'].copy()
+        p_sim['geometry'] = p_sim['geometry'].simplify(150)
+        gdfs_to_concat.append(p_sim.to_crs(epsg=4326))
+        
+    if not gdfs_to_concat:
+        return None
+        
+    combined = pd.concat(gdfs_to_concat, ignore_index=True)
+    if isinstance(combined, pd.DataFrame) and not isinstance(combined, gpd.GeoDataFrame):
+        combined = gpd.GeoDataFrame(combined, geometry='geometry', crs="EPSG:4326")
+        
+    # Agregamos la columna de tooltip para Pydeck sin tags HTML
+    if 'SITE_NAME' in combined.columns and 'ODESIGNATE' in combined.columns:
+        combined['tooltip_text'] = combined['ODESIGNATE'].fillna("Espacio Protegido") + " - " + combined['SITE_NAME'].fillna("")
+        
+    return json.loads(combined.to_json())
 
 # 1. PAGE SETUP & STYLING
 st.set_page_config(page_title="European Wildfire Tracker", layout="wide")
@@ -14,7 +65,7 @@ def load_css(file_path: str):
 # Load external custom styles
 load_css("css/styles.css")
 
-st.title("Live European Wildfire Tracker")
+st.title("European Wildfire Tracker - NASA FIRMS")
 
 # st.write("Displaying active fire anomalies detected by NASA satellites over the last 24 hours.")
 
@@ -63,9 +114,35 @@ with top_col2:
 
 
 with top_col3:
-    total_fires_high_confidence = len(high_confidence_fires)
-    
-    est_eco_fires = int(total_fires * 0.40)
+    # Best Practices 2026: Use GeoParquet for extreme performance and handle CRSs independently for accuracy.
+    enp_gdfs = load_enp_data()
+
+    if gpd is not None and enp_gdfs:
+        try:
+            # Convert active fires to a base GeoDataFrame (WGS84)
+            geometry = [Point(xy) for xy in zip(high_confidence_fires['longitude'], high_confidence_fires['latitude'])]
+            fires_gdf_base = gpd.GeoDataFrame(high_confidence_fires, geometry=geometry, crs="EPSG:4326")
+            
+            near_fire_indices = set()
+            
+            # Intersect with Canary Islands (Projected to UTM Zone 28N)
+            if 'canarias' in enp_gdfs:
+                fires_c = fires_gdf_base.to_crs(enp_gdfs['canarias'].crs)
+                fires_near_c = gpd.sjoin_nearest(fires_c, enp_gdfs['canarias'], max_distance=5000)
+                near_fire_indices.update(fires_near_c.index.tolist())
+                
+            # Intersect with Peninsula (Projected to UTM Zone 30N)
+            if 'peninsula' in enp_gdfs:
+                fires_p = fires_gdf_base.to_crs(enp_gdfs['peninsula'].crs)
+                fires_near_p = gpd.sjoin_nearest(fires_p, enp_gdfs['peninsula'], max_distance=5000)
+                near_fire_indices.update(fires_near_p.index.tolist())
+                
+            est_eco_fires = len(near_fire_indices)
+        except Exception as e:
+            st.error(f"Error procesando la capa espacial ENP: {e}")
+            est_eco_fires = int(total_fires * 0.30)
+    else:
+        est_eco_fires = int(total_fires * 0.30)  # Fallback estimate: ~30% near ecological areas
     
     st.metric("🌲 Fires < 5km from Ecological Zones", value=f"{est_eco_fires} - {est_eco_fires + 25}")
 
@@ -98,25 +175,62 @@ with col2:
         unsafe_allow_html=True
     )
     
+    # --- HISTORICAL DATA UI ---
+    st.success("API Key cargada: Modo Histórico Activado")
+    col2_a, col2_b = st.columns(2)
+    with col2_a:
+        selected_date = st.date_input("Selecciona la fecha final:", datetime.date.today())
+    with col2_b:
+        selected_range = st.slider("Días a visualizar hacia atrás:", min_value=1, max_value=5, value=5)
+        
     @st.cache_data(ttl=3600)
-    def get_spain_fire_data():
-        # Fetch 7-day data for Europe
-        url = "https://firms.modaps.eosdis.nasa.gov/data/active_fire/noaa-20-viirs-c2/csv/J1_VIIRS_C2_Europe_7d.csv"
-        data = pd.read_csv(url)
+    def get_historical_spain_data(api_key, date_str, days, source):
+        # The Area API URL format: /api/area/csv/[MAP_KEY]/[SOURCE]/[AREA]/[DAY_RANGE]/[DATE]
+        # Bounding box for Spain: -9.5,35.5,4.5,44.0
+        url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}/{source}/-9.5,35.5,4.5,44.0/{days}/{date_str}"
+        try:
+            data = pd.read_csv(url)
+        except Exception as e:
+            st.error(f"Error conectando con la API de NASA FIRMS: {e}")
+            return pd.DataFrame()
+            
+        if data.empty or 'confidence' not in data.columns:
+            return pd.DataFrame()
         
-        # Filter for nominal/high confidence
-        data = data[data['confidence'].isin(['nominal', 'high'])]
+        # Filter for nominal/high confidence (API uses 'n', 'h')
+        data = data[data['confidence'].isin(['nominal', 'high', 'n', 'h'])]
+        return data
+
+    # Calculate the start date for the API request. 
+    # FIRMS Area API expects [START_DATE] and [DAY_RANGE] (number of days going forward).
+    start_date = selected_date - datetime.timedelta(days=selected_range - 1)
+    
+    # Decide the dataset source depending on the selected date
+    # NRT (Near Real-Time) is only available for recent days.
+    # SP (Standard Processing) is available for historical data (e.g., 2025).
+    days_diff = (datetime.date.today() - selected_date).days
+    source = "VIIRS_SNPP_SP" if days_diff > 30 else "VIIRS_SNPP_NRT"
+
+    # Fetch data directly with the API
+    raw_spain_data = get_historical_spain_data(
+        st.secrets["FIRMS_API_KEY"], 
+        start_date.strftime("%Y-%m-%d"), 
+        selected_range,
+        source
+    )
         
-        # Filter for Spain bounding box roughly: lon [-9.5, 4.5], lat [35.5, 44.0]
-        spain_data = data[
-            (data['longitude'] >= -9.5) & (data['longitude'] <= 4.5) &
-            (data['latitude'] >= 35.5) & (data['latitude'] <= 44.0)
-        ].copy()
-        
+    if not raw_spain_data.empty:
         # Parse datetime to calculate time since detection
-        spain_data['acq_datetime'] = pd.to_datetime(spain_data['acq_date'] + ' ' + spain_data['acq_time'].astype(str).str.zfill(4), format='%Y-%m-%d %H%M')
+        raw_spain_data['acq_datetime'] = pd.to_datetime(raw_spain_data['acq_date'] + ' ' + raw_spain_data['acq_time'].astype(str).str.zfill(4), format='%Y-%m-%d %H%M')
         
-        dt_max = spain_data['acq_datetime'].max()
+        # Agregamos la columna de tooltip unificada para Pydeck sin tags HTML
+        raw_spain_data['tooltip_text'] = (
+            "Detección de Incendio - " +
+            "Fecha: " + raw_spain_data['acq_datetime'].dt.strftime('%Y-%m-%d %H:%M') + " - " +
+            "Confianza: " + raw_spain_data['confidence'].astype(str)
+        )
+        
+        dt_max = raw_spain_data['acq_datetime'].max()
         
         def get_color(row):
             diff = dt_max - row['acq_datetime']
@@ -129,19 +243,19 @@ with col2:
             else:
                 return [255, 255, 0, 200]  # Yellow
                 
-        spain_data['color_rgba'] = spain_data.apply(get_color, axis=1)
-        
-        return spain_data
-
-    spain_df = get_spain_fire_data()
+        raw_spain_data['color_rgba'] = raw_spain_data.apply(get_color, axis=1)
+    
+    spain_df = raw_spain_data
     
     # Use PyDeck for a premium, dynamic interactive map with tooltips
-    layer = pdk.Layer(
+    layers = []
+    
+    # 1. Fire Layer (Bottom)
+    fire_layer = pdk.Layer(
         "ScatterplotLayer",
         spain_df,
         get_position="[longitude, latitude]",
         get_color="color_rgba",
-        # en metros:
         get_radius=1000, 
         radius_min_pixels=4,
         radius_max_pixels=8,
@@ -149,6 +263,27 @@ with col2:
         opacity=0.8,
         filled=True,
     )
+    layers.append(fire_layer)
+    
+    # 2. Optional ENP Layer (Top)
+    show_enp = st.toggle("Protected Areas(MITECO, Dec. 2025)", value=False)
+    if show_enp:
+        enp_geojson = get_simplified_enp_geojson()
+        if enp_geojson:
+            enp_layer = pdk.Layer(
+                "GeoJsonLayer",
+                data=enp_geojson,
+                pickable=True,
+                stroked=True,
+                filled=True,
+                get_fill_color="[34, 139, 34, 40]",  # Transparent Green
+                get_line_color="[34, 139, 34, 255]", # Solid Green border
+                line_width_min_pixels=1,
+            )
+            layers.append(enp_layer)
+        else:
+            st.warning("No se encontraron los datos ENP en la carpeta data/.")
+
     
     view_state = pdk.ViewState(
         latitude=40.0,
@@ -158,10 +293,10 @@ with col2:
     )
     
     st.pydeck_chart(pdk.Deck(
-        layers=[layer],
+        layers=layers,
         initial_view_state=view_state,
         tooltip={
-            "html": "<b>Fire Detected:</b> {acq_datetime}<br/><b>Confidence:</b> {confidence}<br/><b>Coords:</b> {latitude}, {longitude}",
+            "html": "{tooltip_text}",
             "style": {"backgroundColor": "steelblue", "color": "white"}
         }
     ))
