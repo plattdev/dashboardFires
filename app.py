@@ -507,8 +507,21 @@ def filter_spain(df: pd.DataFrame) -> pd.DataFrame:
 #  STREAMLIT UI
 # ═════════════════════════════════════════════════════════════════════════════
 
-st.title("European & Mediterranean Wildfire Tracker — NASA FIRMS")
-st.subheader("Spain — Active Fire Detections")
+st.markdown("""
+    <style>
+    .block-container {
+        padding-top: 1.5rem !important;
+        padding-bottom: 0rem !important;
+    }
+    footer {visibility: hidden;} /* Hide default Streamlit footer to prevent vertical scrolling */
+    </style>
+""", unsafe_allow_html=True)
+st.markdown("#### European & Mediterranean Wildfire Tracker (Spain) — NASA FIRMS")
+st.markdown(
+    "**Context:** This dashboard highlights the concerning increase in active fires and burnt areas "
+    "across Spain during the summer months. Alarmingly, many of these incidents are intentionally "
+    "caused. Data is sourced from NASA FIRMS (near real-time detections) and Copernicus EFFIS."
+)
 
 # ── Controls + KPIs row (side by side) ────────────────────────────────────────
 # Left column: date picker + slider.  Right columns: KPI metrics.
@@ -577,74 +590,81 @@ if effis_gdf is not None and not effis_gdf.empty:
     effis_count = len(effis_gdf)
     for candidate in ["AREA_HA", "AREA", "area_ha"]:
         if candidate in effis_gdf.columns:
-            effis_total_ha = float(effis_gdf[candidate].sum())
+            numeric_area = pd.to_numeric(effis_gdf[candidate], errors="coerce").fillna(0.0)
+            effis_total_ha = float(numeric_area.sum())
             break
 
 # ── Render KPIs (in the columns defined above) ───────────────────────────────
 with k1:
-    st.metric("High-Conf Fires", total_fires)
-    st.metric("Near Protected", eco_fires)
+    st.metric("Total Active Fires (High Conf.)", total_fires)
+    st.metric("Fires near Protected Areas", eco_fires)
 with k2:
-    st.metric("Pop. Exposed (5 km)", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
-    st.metric("Mean Density", f"{pop_kpis['mean_density']:.1f} hab/px" if pop_kpis["mean_density"] else "—")
+    st.metric("Population Exposed (5 km)", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
+    st.metric("Mean Pop. Density (hab/px)", f"{pop_kpis['mean_density']:.1f}" if pop_kpis["mean_density"] else "—")
 with k3:
-    st.metric("Burnt Area 2026", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
-    st.metric("EFFIS Fires 2026", effis_count if effis_count else "—")
+    st.metric("Total Burnt Area 2026 (EFFIS)", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
+    st.metric("Total EFFIS Fires (2026)", effis_count if effis_count else "—")
 
-# ── Legend & layer toggles ────────────────────────────────────────────────────
-leg_col, t1, t2 = st.columns([2.5, 1, 1])
+# Global KPI font size reduction and robust Toggle CSS
+st.markdown("""
+<style>
+div[data-testid="stMetricValue"] {
+    font-size: 1.2rem !important;
+}
+div[data-testid="stMetricValue"] > div {
+    font-size: 1.2rem !important;
+}
+div[data-testid="stMetricLabel"] p {
+    font-size: 0.8rem !important;
+}
 
-with leg_col:
-    st.markdown(
-        "**Legend:** "
-        '<span style="color:#8B0000">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
-        '<span style="color:#FF0000">⬤</span> 24–48 h &nbsp;|&nbsp; '
-        '<span style="color:#FFA500">⬤</span> 2–4 days &nbsp;|&nbsp; '
-        '<span style="color:#FFFF00">⬤</span> > 4 days &nbsp;|&nbsp; '
-        '<span style="color:#B22222">■</span> Burnt Areas (EFFIS 2026, Synchronous)',
-        unsafe_allow_html=True,
-    )
-    # Global KPI font size reduction
-    st.markdown("""
-    <style>
-    div[data-testid="stMetricValue"] {
-        font-size: 1.2rem !important;
-    }
-    div[data-testid="stMetricValue"] > div {
-        font-size: 1.2rem !important;
-    }
-    div[data-testid="stMetricLabel"] p {
-        font-size: 0.8rem !important;
-    }
-    
-    /* Protected Areas Toggle (2nd horizontal block, 2nd column) */
-    div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(2) div[data-testid="stToggle"] input:checked + div {
-        background-color: #6B8E23 !important;
-    }
-    div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(2) div[data-testid="stWidgetLabel"] p {
-        color: #6B8E23 !important;
-        font-weight: 500;
-    }
-    
-    /* Population Toggle (2nd horizontal block, 3rd column) */
-    div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(3) div[data-testid="stToggle"] input:checked + div {
-        background-color: #4A90E2 !important;
-    }
-    div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(3) div[data-testid="stWidgetLabel"] p {
-        color: #4A90E2 !important;
-        font-weight: 500;
-    }
-    </style>
-    """, unsafe_allow_html=True)
+/* Protected Areas Toggle */
+div[data-testid="stElementContainer"]:has(.enp-anchor) + div[data-testid="stElementContainer"] div[data-testid="stToggle"] input:checked + div {
+    background-color: #6B8E23 !important;
+}
+div[data-testid="stElementContainer"]:has(.enp-anchor) + div[data-testid="stElementContainer"] div[data-testid="stWidgetLabel"] p {
+    color: #6B8E23 !important;
+    font-weight: 500;
+}
 
-with t1:
-    show_enp = st.toggle("Show Protected Areas", value=False)
-    
-with t2:
-    show_pop = st.toggle("Show Population", value=False)
+/* Population Toggle */
+div[data-testid="stElementContainer"]:has(.pop-anchor) + div[data-testid="stElementContainer"] div[data-testid="stToggle"] input:checked + div {
+    background-color: #4A90E2 !important;
+}
+div[data-testid="stElementContainer"]:has(.pop-anchor) + div[data-testid="stElementContainer"] div[data-testid="stWidgetLabel"] p {
+    color: #4A90E2 !important;
+    font-weight: 500;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # EFFIS burnt areas are now permanent
 show_effis = True
+
+# ── Map & Histogram Layout ────────────────────────────────────────────────────
+hist_col, map_col = st.columns([1, 2], gap="large")
+
+with map_col:
+    # ── Legend & Layer toggles ────────────────────────────────────────────────
+    t_leg, t1, t2 = st.columns([2.8, 1, 1])
+    with t_leg:
+        st.markdown(
+            "<div style='margin-top: 10px; margin-bottom: 0px; font-size: 0.85em;'>"
+            "<b>Legend:</b> "
+            '<span style="color:#8B0000">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
+            '<span style="color:#FF0000">⬤</span> 24–48 h &nbsp;|&nbsp; '
+            '<span style="color:#FFA500">⬤</span> 2–4 days &nbsp;|&nbsp; '
+            '<span style="color:#FFFF00">⬤</span> > 4 days &nbsp;|&nbsp; '
+            '<span style="color:#B22222">■</span> Burnt Areas (EFFIS 2026, Synchronous)'
+            "</div>",
+            unsafe_allow_html=True,
+        )
+    with t1:
+        st.markdown('<div class="enp-anchor"></div>', unsafe_allow_html=True)
+        show_enp = st.toggle("Show Protected Areas", value=False)
+    with t2:
+        st.markdown('<div class="pop-anchor"></div>', unsafe_allow_html=True)
+        show_pop = st.toggle("Show Population", value=False)
 
 # ── Build map layers ──────────────────────────────────────────────────────────
 layers: list[pdk.Layer] = []
@@ -723,8 +743,6 @@ if show_pop:
     else:
         st.warning("Population raster not found in data/ folder.")
 
-# ── Map & Histogram Layout ────────────────────────────────────────────────────
-hist_col, map_col = st.columns([1, 2], gap="large")
 
 with hist_col:
     if effis_gdf is not None and not effis_gdf.empty:
@@ -748,12 +766,24 @@ with hist_col:
             monthly["Month"] = monthly["Month_Num"].astype(str).str.zfill(2) + " - " + monthly["Month"]
             monthly["Area (x1000 ha)"] = monthly[area_c] / 1000.0
             
-            # Properly specify x and y to fix Streamlit rendering scatter plot bugs
-            st.bar_chart(monthly, x="Month", y="Area (x1000 ha)", color="#B22222")
+            # Properly specify x and y, and limit height to avoid vertical scrolling
+            st.bar_chart(monthly, x="Month", y="Area (x1000 ha)", color="#B22222", height=450)
         else:
             st.info("Monthly data not available.")
     else:
         st.info("No EFFIS data available.")
+
+    # Data sources below the bar chart
+    st.markdown(
+        "<div style='margin-top: 15px; margin-bottom: 0px; font-size: 0.75em; color: gray; line-height: 1.4;'>"
+        "<b>Data sources:</b> NASA FIRMS (VIIRS) | MITECO (Protected Natural Areas) | "
+        "<a href='https://www.worldpop.org/' style='color: gray; text-decoration: none;'>WorldPop</a> Population Data "
+        "(<a href='https://creativecommons.org/licenses/by/4.0/' style='color: gray; text-decoration: none;'>CC BY 4.0</a> / "
+        "<a href='https://opendatacommons.org/licenses/odbl/' style='color: gray; text-decoration: none;'>ODbL</a>) | "
+        "<a href='https://effis.jrc.ec.europa.eu/' style='color: gray; text-decoration: none;'>EFFIS / Copernicus EMS</a> Burnt Areas"
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 with map_col:
     st.pydeck_chart(
@@ -769,11 +799,5 @@ with map_col:
         ),
         use_container_width=True
     )
+    
 
-st.caption(
-    "Data sources: NASA FIRMS (VIIRS) | MITECO (Protected Natural Areas) | "
-    "[WorldPop](https://www.worldpop.org/) Population Data "
-    "([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) / "
-    "[ODbL](https://opendatacommons.org/licenses/odbl/)) | "
-    "[EFFIS / Copernicus EMS](https://effis.jrc.ec.europa.eu/) Burnt Areas"
-)
