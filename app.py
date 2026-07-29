@@ -513,7 +513,7 @@ st.subheader("Spain — Active Fire Detections")
 # ── Controls + KPIs row (side by side) ────────────────────────────────────────
 # Left column: date picker + slider.  Right columns: KPI metrics.
 # This layout keeps everything compact at the top so the map gets max height.
-ctrl_col, k1, k2, k3, k4 = st.columns([1.5, 1, 1, 1, 1])
+ctrl_col, k1, k2, k3 = st.columns([1.5, 1, 1, 1])
 
 with ctrl_col:
     selected_date  = st.date_input("End date:", datetime.date.today())
@@ -582,20 +582,17 @@ if effis_gdf is not None and not effis_gdf.empty:
 
 # ── Render KPIs (in the columns defined above) ───────────────────────────────
 with k1:
-    st.metric("🔥 High-Conf Fires", total_fires)
-    st.metric("🌿 Near Protected", eco_fires)
+    st.metric("High-Conf Fires", total_fires)
+    st.metric("Near Protected", eco_fires)
 with k2:
-    st.metric("👥 Pop. Exposed (5 km)", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
-    st.metric("📊 Mean Density", f"{pop_kpis['mean_density']:.1f} hab/px" if pop_kpis["mean_density"] else "—")
+    st.metric("Pop. Exposed (5 km)", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
+    st.metric("Mean Density", f"{pop_kpis['mean_density']:.1f} hab/px" if pop_kpis["mean_density"] else "—")
 with k3:
-    st.metric("🔥 Burnt Area 2026", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
-    st.metric("📋 EFFIS Fires 2026", effis_count if effis_count else "—")
-with k4:
-    st.metric("📅 Date Range", f"{start_date} → {selected_date}")
-    st.metric("📡 Source", source.replace("VIIRS_SNPP_", ""))
+    st.metric("Burnt Area 2026", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
+    st.metric("EFFIS Fires 2026", effis_count if effis_count else "—")
 
 # ── Legend & layer toggles ────────────────────────────────────────────────────
-leg_col, t1, t2, t3 = st.columns([2, 1, 1, 1])
+leg_col, t1, t2 = st.columns([2.5, 1, 1])
 
 with leg_col:
     st.markdown(
@@ -604,16 +601,50 @@ with leg_col:
         '<span style="color:#FF0000">⬤</span> 24–48 h &nbsp;|&nbsp; '
         '<span style="color:#FFA500">⬤</span> 2–4 days &nbsp;|&nbsp; '
         '<span style="color:#FFFF00">⬤</span> > 4 days &nbsp;|&nbsp; '
-        '<span style="color:#B22222">■</span> Burnt Areas (EFFIS)',
+        '<span style="color:#B22222">■</span> Burnt Areas (EFFIS 2026, Synchronous)',
         unsafe_allow_html=True,
     )
+    # Global KPI font size reduction
+    st.markdown("""
+    <style>
+    div[data-testid="stMetricValue"] {
+        font-size: 1.2rem !important;
+    }
+    div[data-testid="stMetricValue"] > div {
+        font-size: 1.2rem !important;
+    }
+    div[data-testid="stMetricLabel"] p {
+        font-size: 0.8rem !important;
+    }
+    
+    /* Protected Areas Toggle (2nd horizontal block, 2nd column) */
+    div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(2) div[data-testid="stToggle"] input:checked + div {
+        background-color: #6B8E23 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(2) div[data-testid="stWidgetLabel"] p {
+        color: #6B8E23 !important;
+        font-weight: 500;
+    }
+    
+    /* Population Toggle (2nd horizontal block, 3rd column) */
+    div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(3) div[data-testid="stToggle"] input:checked + div {
+        background-color: #4A90E2 !important;
+    }
+    div[data-testid="stHorizontalBlock"]:nth-of-type(2) > div:nth-child(3) div[data-testid="stWidgetLabel"] p {
+        color: #4A90E2 !important;
+        font-weight: 500;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 with t1:
     show_enp = st.toggle("Show Protected Areas", value=False)
+    
 with t2:
     show_pop = st.toggle("Show Population", value=False)
-with t3:
-    show_effis = st.toggle("Show Burnt Areas", value=True)
+
+# EFFIS burnt areas are now permanent
+show_effis = True
 
 # ── Build map layers ──────────────────────────────────────────────────────────
 layers: list[pdk.Layer] = []
@@ -692,19 +723,52 @@ if show_pop:
     else:
         st.warning("Population raster not found in data/ folder.")
 
-# ── Render the map ────────────────────────────────────────────────────────────
-st.pydeck_chart(
-    pdk.Deck(
-        layers=layers,
-        initial_view_state=pdk.ViewState(
-            latitude=40.0, longitude=-3.0, zoom=5, pitch=0
+# ── Map & Histogram Layout ────────────────────────────────────────────────────
+hist_col, map_col = st.columns([1, 2], gap="large")
+
+with hist_col:
+    if effis_gdf is not None and not effis_gdf.empty:
+        st.markdown("#### Monthly Burnt Area (2026)")
+        date_c = next((c for c in ["FIREDATE", "INITIALDATE", "INIT_DATE"] if c in effis_gdf.columns), None)
+        area_c = next((c for c in ["AREA_HA", "AREA", "area_ha"] if c in effis_gdf.columns), None)
+
+        if date_c and area_c:
+            chart_df = effis_gdf.copy()
+            chart_df["Month"] = pd.to_datetime(chart_df[date_c]).dt.month_name()
+            chart_df["Month_Num"] = pd.to_datetime(chart_df[date_c]).dt.month
+            
+            # Ensure area is numeric before summing
+            chart_df[area_c] = pd.to_numeric(chart_df[area_c], errors="coerce").fillna(0.0)
+            
+            # Sum up area_ha by month
+            monthly = chart_df.groupby(["Month_Num", "Month"], as_index=False)[area_c].sum()
+            monthly = monthly.sort_values("Month_Num")
+            
+            # Format X-axis and Y-axis for better readability
+            monthly["Month"] = monthly["Month_Num"].astype(str).str.zfill(2) + " - " + monthly["Month"]
+            monthly["Area (x1000 ha)"] = monthly[area_c] / 1000.0
+            
+            # Properly specify x and y to fix Streamlit rendering scatter plot bugs
+            st.bar_chart(monthly, x="Month", y="Area (x1000 ha)", color="#B22222")
+        else:
+            st.info("Monthly data not available.")
+    else:
+        st.info("No EFFIS data available.")
+
+with map_col:
+    st.pydeck_chart(
+        pdk.Deck(
+            layers=layers,
+            initial_view_state=pdk.ViewState(
+                latitude=40.0, longitude=-3.0, zoom=5, pitch=0
+            ),
+            tooltip={
+                "html": "{tooltip_text}",
+                "style": {"backgroundColor": "steelblue", "color": "white"},
+            },
         ),
-        tooltip={
-            "html": "{tooltip_text}",
-            "style": {"backgroundColor": "steelblue", "color": "white"},
-        },
+        use_container_width=True
     )
-)
 
 st.caption(
     "Data sources: NASA FIRMS (VIIRS) | MITECO (Protected Natural Areas) | "
