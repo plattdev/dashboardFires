@@ -1,0 +1,11 @@
+# Direct dependencies only — transitive deps managed by pip.
+streamlit>=1.60       # Web-app framework (dashboard UI)
+pandas>=3.0           # DataFrames, CSV parsing
+pydeck>=0.9           # 3D WebGL map rendering
+geopandas>=1.0        # Spatial joins, CRS reprojections (ENP layer)
+pyarrow>=24.0         # Read GeoParquet files (ENP data)
+shapely>=2.0          # Point geometry creation for spatial queries
+numpy>=2.0            # Vectorised array math (colors, population masks)
+rasterio>=1.5         # Read WorldPop population GeoTIFF raster
+scipy>=1.14           # cKDTree for fast spatial proximity queries (population KPIs)
+requests>=2.32        # HTTP client for downloading EFFIS burnt-area data from JRC
