@@ -520,7 +520,7 @@ st.markdown("""
 st.markdown("#### Spanish Wildfire Tracker — NASA FIRMS")
 st.markdown(
     "**Context:** This dashboard tracks active thermal anomalies and cumulative burned area in Spain (sourced from NASA FIRMS and Copernicus EFFIS)."
-    "While human ignitions—both negligent and intentional—remain the primary trigger, climate-driven fuel dryness, coupled with rural land abandonment and dense biomass accumulation, enables localized ignitions to rapidly escalate into uncontrollable, high-intensity megafires.   "
+    " While human ignitions—both negligent and intentional—remain the primary trigger, climate-driven fuel dryness, coupled with rural land abandonment and dense biomass accumulation, enables localized ignitions to rapidly escalate into uncontrollable, high-intensity megafires.   "
 )
 
 # ── Controls + KPIs row (side by side) ────────────────────────────────────────
