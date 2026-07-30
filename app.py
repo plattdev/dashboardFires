@@ -366,11 +366,12 @@ def _hash_fire_df(fires_df: pd.DataFrame) -> str:
 
 @st.cache_data(show_spinner=False)
 def compute_eco_fires(_fire_hash: str, fires_df: pd.DataFrame) -> int:
-    """Count fires within 5 km of a Spanish protected natural area (ENP).
+    """Count fires falling inside a Spanish protected natural area (ENP).
 
     Creates fire point geometries with the vectorised gpd.points_from_xy()
     (C-backed, ~10× faster than a Python loop of shapely.Point calls), then
-    performs projected spatial joins for each ENP region.
+    performs a spatial join with the 'intersects' predicate — only fires whose
+    location falls within (or touches the boundary of) an ENP polygon are counted.
 
     Parameters
     ----------
@@ -379,7 +380,7 @@ def compute_eco_fires(_fire_hash: str, fires_df: pd.DataFrame) -> int:
 
     Returns
     -------
-    int — number of unique fires within 5 km of any ENP boundary.
+    int — number of unique fires inside any ENP boundary.
     """
     enp_gdfs = load_enp_geodataframes()
     if not enp_gdfs or fires_df.empty:
@@ -392,13 +393,13 @@ def compute_eco_fires(_fire_hash: str, fires_df: pd.DataFrame) -> int:
         crs="EPSG:4326",
     )
 
-    near_indices: set[int] = set()
+    hit_indices: set[int] = set()
     for enp_gdf in enp_gdfs.values():
         fires_projected = fires_gdf.to_crs(enp_gdf.crs)
-        joined = gpd.sjoin_nearest(fires_projected, enp_gdf, max_distance=5000)
-        near_indices.update(joined.index.tolist())
+        joined = gpd.sjoin(fires_projected, enp_gdf, predicate="intersects")
+        hit_indices.update(joined.index.tolist())
 
-    return len(near_indices)
+    return len(hit_indices)
 
 
 @st.cache_data(show_spinner=False)
@@ -516,7 +517,7 @@ st.markdown("""
     footer {visibility: hidden;} /* Hide default Streamlit footer to prevent vertical scrolling */
     </style>
 """, unsafe_allow_html=True)
-st.markdown("#### European & Mediterranean Wildfire Tracker (Spain) — NASA FIRMS")
+st.markdown("#### Spanish Wildfire Tracker — NASA FIRMS")
 st.markdown(
     "**Context:** This dashboard highlights the concerning increase in active fires and burnt areas "
     "across Spain during the summer months. Alarmingly, many of these incidents are intentionally "
@@ -597,10 +598,10 @@ if effis_gdf is not None and not effis_gdf.empty:
 # ── Render KPIs (in the columns defined above) ───────────────────────────────
 with k1:
     st.metric("Total Active Fires (High Conf.)", total_fires)
-    st.metric("Fires near Protected Areas", eco_fires)
+    st.metric("Fires in Protected Areas", eco_fires)
 with k2:
-    st.metric("Population Exposed (5 km)", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
-    st.metric("Mean Pop. Density (hab/px)", f"{pop_kpis['mean_density']:.1f}" if pop_kpis["mean_density"] else "—")
+    st.metric("People within 5 km of Fires", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
+    st.metric("Avg. Population at Fire Sites", f"{pop_kpis['mean_density']:.1f}" if pop_kpis["mean_density"] else "—")
 with k3:
     st.metric("Total Burnt Area 2026 (EFFIS)", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
     st.metric("Total EFFIS Fires (2026)", effis_count if effis_count else "—")
