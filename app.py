@@ -519,15 +519,15 @@ st.markdown("""
 """, unsafe_allow_html=True)
 st.markdown("#### Spanish Wildfire Tracker — NASA FIRMS")
 st.markdown(
-    "**Context:** This dashboard highlights the concerning increase in active fires and burnt areas "
-    "across Spain during the summer months. Alarmingly, many of these incidents are intentionally "
-    "caused. Data is sourced from NASA FIRMS (near real-time detections) and Copernicus EFFIS."
+    "**Context:** This dashboard tracks active thermal anomalies and cumulative burned area in Spain (sourced from NASA FIRMS and Copernicus EFFIS)."
+    "While human ignitions—both negligent and intentional—remain the primary trigger, climate-driven fuel dryness, coupled with rural land abandonment and dense biomass accumulation, enables localized ignitions to rapidly escalate into uncontrollable, high-intensity megafires.   "
 )
 
 # ── Controls + KPIs row (side by side) ────────────────────────────────────────
 # Left column: date picker + slider.  Right columns: KPI metrics.
-# This layout keeps everything compact at the top so the map gets max height.
-ctrl_col, k1, k2, k3 = st.columns([1.5, 1, 1, 1])
+# Ratios [1, 0.67, 0.67, 0.67] keep ctrl_col at ~1/3 width (matching the
+# histogram column below) so the KPIs start at the map's left edge.
+ctrl_col, k1, k2, k3 = st.columns([1, 0.67, 0.67, 0.67], gap="large")
 
 with ctrl_col:
     selected_date  = st.date_input("End date:", datetime.date.today())
@@ -600,8 +600,8 @@ with k1:
     st.metric("Total Active Fires (High Conf.)", total_fires)
     st.metric("Fires in Protected Areas", eco_fires)
 with k2:
-    st.metric("People within 5 km of Fires", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
-    st.metric("Avg. Population at Fire Sites", f"{pop_kpis['mean_density']:.1f}" if pop_kpis["mean_density"] else "—")
+    st.metric("People within 5 km of Fires", f"{pop_kpis['exposed_pop']:,} people" if pop_kpis["exposed_pop"] else "—")
+    st.metric("Avg. Population at Fire Sites", f"{pop_kpis['mean_density']:.1f} people / ha" if pop_kpis["mean_density"] else "—")
 with k3:
     st.metric("Total Burnt Area 2026 (EFFIS)", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
     st.metric("Total EFFIS Fires (2026)", effis_count if effis_count else "—")
