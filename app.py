@@ -365,7 +365,7 @@ def _hash_fire_df(fires_df: pd.DataFrame) -> str:
 
 
 @st.cache_data(show_spinner=False)
-def compute_eco_fires(_fire_hash: str, fires_df: pd.DataFrame) -> int:
+def compute_eco_fires(fire_hash: str, _fires_df: pd.DataFrame) -> int:
     """Count fires falling inside a Spanish protected natural area (ENP).
 
     Creates fire point geometries with the vectorised gpd.points_from_xy()
@@ -375,21 +375,21 @@ def compute_eco_fires(_fire_hash: str, fires_df: pd.DataFrame) -> int:
 
     Parameters
     ----------
-    _fire_hash : MD5 hash of the fire coordinates (used as cache key).
-    fires_df   : Fire DataFrame with 'latitude' and 'longitude' columns.
+    fire_hash : MD5 hash of the fire coordinates (used as cache key).
+    _fires_df  : Fire DataFrame with 'latitude' and 'longitude' columns.
 
     Returns
     -------
     int — number of unique fires inside any ENP boundary.
     """
     enp_gdfs = load_enp_geodataframes()
-    if not enp_gdfs or fires_df.empty:
+    if not enp_gdfs or _fires_df.empty:
         return 0
 
     # Vectorised geometry creation — no Python loop needed
     fires_gdf = gpd.GeoDataFrame(
-        fires_df,
-        geometry=gpd.points_from_xy(fires_df["longitude"], fires_df["latitude"]),
+        _fires_df,
+        geometry=gpd.points_from_xy(_fires_df["longitude"], _fires_df["latitude"]),
         crs="EPSG:4326",
     )
 
@@ -403,7 +403,7 @@ def compute_eco_fires(_fire_hash: str, fires_df: pd.DataFrame) -> int:
 
 
 @st.cache_data(show_spinner=False)
-def compute_population_kpis(_fire_hash: str, fires_df: pd.DataFrame) -> dict[str, float | int]:
+def compute_population_kpis(fire_hash: str, _fires_df: pd.DataFrame) -> dict[str, float | int]:
     """Compute population-exposure KPIs by sampling the WorldPop raster.
 
     Uses scipy's cKDTree for a single vectorised proximity query instead of
@@ -412,8 +412,8 @@ def compute_population_kpis(_fire_hash: str, fires_df: pd.DataFrame) -> dict[str
 
     Parameters
     ----------
-    _fire_hash : MD5 hash of the fire coordinates (used as cache key).
-    fires_df   : Fire DataFrame with 'latitude' and 'longitude' columns.
+    fire_hash : MD5 hash of the fire coordinates (used as cache key).
+    _fires_df  : Fire DataFrame with 'latitude' and 'longitude' columns.
 
     Returns
     -------
@@ -425,13 +425,13 @@ def compute_population_kpis(_fire_hash: str, fires_df: pd.DataFrame) -> dict[str
 
     # ── 1. Exposed population (vectorised with cKDTree) ───────────────────
     pop_df = load_population_heatmap_data()
-    if pop_df is not None and not pop_df.empty and not fires_df.empty:
+    if pop_df is not None and not pop_df.empty and not _fires_df.empty:
         # Build a KD-tree of population cell coordinates
         pop_coords = np.column_stack([pop_df["lat"].values, pop_df["lon"].values])
         tree = cKDTree(pop_coords)
 
         # Query all population cells within the degree buffer of any fire
-        fire_coords = np.column_stack([fires_df["latitude"].values, fires_df["longitude"].values])
+        fire_coords = np.column_stack([_fires_df["latitude"].values, _fires_df["longitude"].values])
         nearby_sets = tree.query_ball_point(fire_coords, r=_DEG_BUFFER_5KM)
 
         # Flatten to unique population-cell indices and sum their population
@@ -444,9 +444,9 @@ def compute_population_kpis(_fire_hash: str, fires_df: pd.DataFrame) -> dict[str
 
     # ── 2. Mean density at fire locations (point-samples the full raster) ─
     src = _open_population_raster()
-    if src is not None and not fires_df.empty:
+    if src is not None and not _fires_df.empty:
         try:
-            coords = list(zip(fires_df["longitude"], fires_df["latitude"]))
+            coords = list(zip(_fires_df["longitude"], _fires_df["latitude"]))
             sampled = np.array([val[0] for val in src.sample(coords)], dtype=np.float32)
             if src.nodata is not None:
                 sampled[sampled == src.nodata] = 0.0
