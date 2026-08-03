@@ -17,7 +17,6 @@ Data sources
 """
 
 # ── Standard-library imports ──────────────────────────────────────────────────
-from streamlit.elements.lib import built_in_chart_utils
 import datetime                        # date arithmetic for date picker & FIRMS query window
 import hashlib                         # MD5 hash of fire data for caching KPI results
 import io                              # in-memory bytes buffer for reading EFFIS zip
@@ -30,7 +29,7 @@ import altair as alt                   # customized chart axes and font sizes
 import geopandas as gpd                # spatial joins & CRS reprojections (ENP layer)
 import numpy as np                     # vectorised array math (colors, population masks)
 import pandas as pd                    # DataFrames — core data structure throughout the app
-import pydeck as pdk                   # 3D WebGL map rendering inside Streamlit - the engine powering the entire interactive map- without it none of the ENP, burnt area or population map would render
+import pydeck as pdk                   # 3D WebGL map rendering inside Streamlit
 import rasterio                        # read the WorldPop population GeoTIFF raster
 import requests                        # HTTP client for downloading EFFIS burnt-area data
 from rasterio.enums import Resampling  # resampling strategy when downscaling the raster
@@ -42,44 +41,109 @@ import streamlit as st                 # the web-app framework that runs everyth
 # Must be the very first Streamlit command in the script.
 st.set_page_config(page_title="Spanish Wildfire Tracker", layout="wide")
 
-# NB: If I want to create a separate CSS style this way
-# def _inject_css(path: Path) -> None:
-#     """Read a CSS file and inject it into the Streamlit page."""
-#     st.markdown(f"<style>{path.read_text(encoding='utf-8')}</style>", unsafe_allow_html=True)
-# _inject_css(Path("css/styles.css"))
+# ── All CSS in a single block ─────────────────────────────────────────────────
+# Consolidated from previously scattered st.markdown(<style>) calls to avoid
+# specificity conflicts and make the stylesheet easy to maintain.
+st.markdown("""
+<style>
+/* ── Global background ─────────────────────────────────────────────────────── */
+.stApp,
+[data-testid="stAppViewContainer"],
+[data-testid="stHeader"] {
+    background-color: #D5D8DC !important;
+}
 
-# Inline CSS — hides the Deploy button & tightens padding.
-st.markdown(
-    """
-    <style>
-    /* Light blue-gray background */
-    .stApp,
-    [data-testid="stAppViewContainer"],
-    [data-testid="stHeader"] {
-        background-color: #D5D8DC !important;
-    }
+/* ── Hide deploy button & footer ───────────────────────────────────────────── */
+[data-testid="stAppDeployButton"],
+.stAppDeployButton { display: none !important; }
+footer { visibility: hidden; }
 
-    /* Hide the Deploy button */
-    [data-testid="stAppDeployButton"],
-    .stAppDeployButton { display: none !important; }
+/* ── Container padding ─────────────────────────────────────────────────────── */
+.main .block-container,
+[data-testid="stMainBlockContainer"],
+.stMainBlockContainer {
+    padding-top: 2rem !important;
+    padding-bottom: 0 !important;
+    padding-left: 2rem !important;
+    padding-right: 2rem !important;
+    max-width: 100% !important;
+}
 
-    /* Reduce whitespace around the main content area */
-    .main .block-container,
-    [data-testid="stMainBlockContainer"],
-    .stMainBlockContainer {
-        padding-top: 1rem !important;
-        padding-bottom: 0 !important;
-        padding-left: 2rem !important;
-        padding-right: 2rem !important;
-        max-width: 100% !important;
-    }
+/* ── Tighten vertical block spacing ────────────────────────────────────────── */
+div[data-testid="stVerticalBlock"] > div { gap: 0.1rem; }
 
-    /* Tighten spacing between vertical blocks */
-    div[data-testid="stVerticalBlock"] > div { gap: 0.1rem; }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+/* ── KPI metric cards ──────────────────────────────────────────────────────── */
+.kpi-card {
+    background-color: #F0F2F6;
+    border-radius: 8px;
+    padding: 8px 14px;
+    margin-bottom: 6px;
+    border: 1px solid rgba(0, 0, 0, 0.05);
+}
+.kpi-card .kpi-label {
+    font-size: 0.72rem;
+    font-weight: 500;
+    color: #6c757d;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    margin: 0;
+    line-height: 1.3;
+}
+.kpi-card .kpi-value {
+    font-size: 1.5rem;
+    font-weight: 700;
+    color: #666666;
+    letter-spacing: -0.02em;
+    margin: 2px 0 0 0;
+    line-height: 1.2;
+}
+
+/* ── Multiselect tag colours ───────────────────────────────────────────────── */
+span[data-baseweb="tag"]:has(span[title="Protected Areas"]) {
+    background-color: #dcedc8 !important;
+}
+span[data-baseweb="tag"]:has(span[title="Population"]) {
+    background-color: #d1c4e9 !important;
+}
+span[data-baseweb="tag"] span,
+span[data-baseweb="tag"] svg {
+    color: #000000 !important;
+    fill: #000000 !important;
+}
+
+/* ── Compact multiselect widget ────────────────────────────────────────────── */
+div[data-testid="stMultiSelect"] {
+    margin-top: 0px !important;
+    margin-bottom: 0px !important;
+}
+div[data-testid="stMultiSelect"] label {
+    display: none !important;
+}
+div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
+    font-size: 0.85rem !important;
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
+}
+span[data-baseweb="tag"] {
+    height: 24px !important;
+    font-size: 0.78rem !important;
+    padding-left: 6px !important;
+    padding-right: 6px !important;
+}
+
+/* ── Chart styling ─────────────────────────────────────────────────────────── */
+[data-testid="stArrowVegaLiteChart"],
+[data-testid="stVegaLiteChart"] {
+    border-radius: 8px !important;
+    overflow: hidden !important;
+    border: 1px solid rgba(0, 0, 0, 0.05) !important;
+}
+
+/* ── Reusable spacer class ─────────────────────────────────────────────────── */
+.spacer-sm { margin-top: 5px; }
+.spacer-md { margin-top: 15px; }
+</style>
+""", unsafe_allow_html=True)
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -91,8 +155,6 @@ _POP_DOWNSAMPLE_FACTOR = 10
 
 # Approximate degree buffer for ~5 km at Spain's latitude (~40°N).
 _DEG_BUFFER_5KM = 0.045
-
-
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -516,15 +578,18 @@ def filter_spain(df: pd.DataFrame) -> pd.DataFrame:
 #  STREAMLIT UI
 # ═════════════════════════════════════════════════════════════════════════════
 
-st.markdown("""
-    <style>
-    .block-container {
-        padding-top: 1.5rem !important;
-        padding-bottom: 0rem !important;
-    }
-    footer {visibility: hidden;} /* Hide default Streamlit footer to prevent vertical scrolling */
-    </style>
-""", unsafe_allow_html=True)
+
+def _kpi_card(label: str, value) -> None:
+    """Render a single KPI as a clean HTML card — no st.metric hacks needed."""
+    st.markdown(
+        f"<div class='kpi-card'>"
+        f"<p class='kpi-label'>{label}</p>"
+        f"<p class='kpi-value'>{value}</p>"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
 st.markdown("#### Spanish Wildfire Tracker  ")
 
 # ── Layout Definition ─────────────────────────────────────────────────────────
@@ -538,7 +603,7 @@ with hist_col:
     with ctx_col2:
         st.markdown(" climate-driven fuel dryness, coupled with rural land abandonment and dense biomass accumulation, enables localized ignitions to rapidly escalate into uncontrollable, high-intensity megafires.")
 
-    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='spacer-sm'></div>", unsafe_allow_html=True)
 
     c1, c2 = st.columns(2)
     with c1:
@@ -614,87 +679,21 @@ if effis_gdf is not None and not effis_gdf.empty:
             effis_total_ha = float(numeric_area.sum())
             break
 
-# Global KPI font size reduction and robust Toggle CSS
-st.markdown("""
-<style>
-/* Style metrics inside rounded light grey boxes */
-div[data-testid="stMetric"] {
-    background-color: #F0F2F6 !important;
-    border-radius: 8px !important;
-    padding: 6px 12px !important;
-    margin-bottom: 4px !important;
-    border: 1px solid rgba(0, 0, 0, 0.05) !important;
-}
-
-div[data-testid="stMetricValue"],
-div[data-testid="stMetricValue"] * {
-    font-size: 1.5rem !important;
-    font-weight: 700 !important;
-    color: #666666 !important;
-    letter-spacing: -0.02em !important;
-}
-div[data-testid="stMetricLabel"] p {
-    font-size: 0.72rem !important;
-    font-weight: 500 !important;
-    color: #6c757d !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.04em !important;
-}
-
-/* Multiselect Tag Colors */
-span[data-baseweb="tag"]:has(span[title="Protected Areas"]) {
-    background-color: #dcedc8 !important; /* Light green */
-}
-
-span[data-baseweb="tag"]:has(span[title="Population"]) {
-    background-color: #d1c4e9 !important; /* Light blue-lilac */
-}
-
-span[data-baseweb="tag"] span,
-span[data-baseweb="tag"] svg {
-    color: #000000 !important;
-    fill: #000000 !important;
-}
-
-/* Compact Multiselect Layer Menu & Vertical Alignment */
-div[data-testid="stMultiSelect"] {
-    margin-top: 0px !important;
-    margin-bottom: 0px !important;
-}
-div[data-testid="stMultiSelect"] label {
-    display: none !important;
-}
-div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
-    font-size: 0.85rem !important;
-    padding-top: 2px !important;
-    padding-bottom: 2px !important;
-}
-span[data-baseweb="tag"] {
-    height: 24px !important;
-    font-size: 0.78rem !important;
-    padding-left: 6px !important;
-    padding-right: 6px !important;
-}
-</style>
-""",unsafe_allow_html=True)
-
-# EFFIS burnt areas are now permanent
-show_effis = True
-
+# ── KPIs, Legend & Layers (right column) ──────────────────────────────────────
 with map_col:
-    # ── Render KPIs centered on top of the map ────────────────────────────────
     k1, k2, k3 = st.columns([1, 1, 1], gap="medium")
     with k1:
-        st.metric("Total Active Fires (High Confidence)", total_fires)
-        st.metric("Fires in Protected Areas", eco_fires)
+        _kpi_card("Total Active Fires (High Confidence)", total_fires)
+        _kpi_card("Fires in Protected Areas", eco_fires)
     with k2:
-        st.metric("People within 5 km of Fires", f"{pop_kpis['exposed_pop']:,} " if pop_kpis["exposed_pop"] else "—")
-        st.metric("Avg. Population at Fire Sites", f"{pop_kpis['mean_density']:.1f} people / ha" if pop_kpis["mean_density"] else "—")
+        _kpi_card("People within 5 km of Fires", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
+        _kpi_card("Avg. Population at Fire Sites", f"{pop_kpis['mean_density']:.1f} people / ha" if pop_kpis["mean_density"] else "—")
     with k3:
-        st.metric("Total Burnt Area 2026 (EFFIS)", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
-        st.metric("Total EFFIS Fires (2026)", effis_count if effis_count else "—")
+        _kpi_card("Total Burnt Area 2026 (EFFIS)", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
+        _kpi_card("Total EFFIS Fires (2026)", effis_count if effis_count else "—")
 
-    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div class='spacer-md'></div>", unsafe_allow_html=True)
+
     # ── Legend & Layer toggles ────────────────────────────────────────────────
     t_leg, t_layers = st.columns([2.1, 1.0], vertical_alignment="center")
     with t_leg:
@@ -755,8 +754,8 @@ if show_enp:
             )
         )
 
-# EFFIS burnt areas (dark red polygons)
-if show_effis and effis_gdf is not None and not effis_gdf.empty:
+# EFFIS burnt areas (dark red polygons — always shown)
+if effis_gdf is not None and not effis_gdf.empty:
     effis_geojson = json.loads(effis_gdf.to_json())
     layers.insert(
         0,
@@ -799,7 +798,7 @@ if show_pop:
     else:
         st.warning("Population raster not found in data/ folder.")
 
-
+# ── Bar chart (left column) ──────────────────────────────────────────────────
 with hist_col:
     if effis_gdf is not None and not effis_gdf.empty:
         st.markdown("#### Monthly Burnt Area (2026)")
@@ -810,18 +809,17 @@ with hist_col:
             chart_df = effis_gdf.copy()
             chart_df["Month"] = pd.to_datetime(chart_df[date_c]).dt.month_name()
             chart_df["Month_Num"] = pd.to_datetime(chart_df[date_c]).dt.month
-            
+
             # Ensure area is numeric before summing
             chart_df[area_c] = pd.to_numeric(chart_df[area_c], errors="coerce").fillna(0.0)
-            
+
             # Sum up area_ha by month
             monthly = chart_df.groupby(["Month_Num", "Month"], as_index=False)[area_c].sum()
             monthly = monthly.sort_values("Month_Num")
-            
-            # Format X-axis and Y-axis for better readability
+
+            # Format Y-axis for better readability
             monthly["Area (x1000 ha)"] = monthly[area_c] / 1000.0
-            
-            # Render Altair bar chart with larger, readable fonts for both X and Y axes
+
             bar_chart_obj = (
                 alt.Chart(monthly)
                 .mark_bar(color="#B22222")
@@ -842,13 +840,8 @@ with hist_col:
                     height=450,
                     padding={"top": 30, "left": 15, "right": 15, "bottom": 15}
                 )
-                .configure_view(
-                    stroke=None,
-                    fill="#F0F2F6"
-                )
-                .configure(
-                    background="#F0F2F6"
-                )
+                .configure_view(stroke=None, fill="#F0F2F6")
+                .configure(background="#F0F2F6")
             )
             st.altair_chart(bar_chart_obj, width="stretch", theme=None)
         else:
@@ -869,18 +862,13 @@ with hist_col:
     )
 
 # ── Map Rendering (Right Column) ──────────────────────────────────────────────
-# Render the main WebGL interactive map using PyDeck inside the right layout column.
 with map_col:
     st.pydeck_chart(
         pdk.Deck(
-            # 'layers' contains all active map layers (Scatterplot fire dots, ENP polygons, EFFIS burnt areas, Heatmap)
             layers=layers,
-            # Initial camera position centered over Spain (lat: 40.0, lon: -3.0) at zoom level 5
-            # pitch=0 sets a flat top-down 2D perspective (increase pitch to e.g. 45 for 3D tilt)
             initial_view_state=pdk.ViewState(
                 latitude=40.0, longitude=-3.0, zoom=5, pitch=0
             ),
-            # Interactive hover tooltip styling — displays formatted text when hovering over data features
             tooltip={
                 "html": "{tooltip_text}",
                 "style": {
@@ -895,9 +883,6 @@ with map_col:
                     "border": "1px solid rgba(255, 255, 255, 0.15)",
                 },
             },
-            # Remove manual height from pdk.Deck so it doesn't conflict with st.pydeck_chart height
         ),
         height="stretch",
     )
-    
-
