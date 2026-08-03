@@ -52,11 +52,11 @@ st.set_page_config(page_title="Spanish Wildfire Tracker", layout="wide")
 st.markdown(
     """
     <style>
-    /* Very light gray background */
+    /* Light blue-gray background */
     .stApp,
     [data-testid="stAppViewContainer"],
     [data-testid="stHeader"] {
-        background-color: #F8F9FA !important;
+        background-color: #D5D8DC !important;
     }
 
     /* Hide the Deploy button */
@@ -526,18 +526,20 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 st.markdown("#### Spanish Wildfire Tracker  ")
-st.markdown(
-    "**Context:** This dashboard tracks active thermal anomalies and cumulative burned area in Spain (sourced from NASA FIRMS and Copernicus EFFIS)."
-    " While human ignitions—both negligent and intentional—remain the primary trigger, climate-driven fuel dryness, coupled with rural land abandonment and dense biomass accumulation, enables localized ignitions to rapidly escalate into uncontrollable, high-intensity megafires.   "
-)
 
-# ── Controls + KPIs row (side by side) ────────────────────────────────────────
-# Left column: date picker + slider.  Right columns: KPI metrics.
-# Ratios [1, 0.67, 0.67, 0.67] keep ctrl_col at ~1/3 width (matching the
-# histogram column below) so the KPIs start at the map's left edge.
-ctrl_col, k1, k2, k3 = st.columns([1, 0.67, 0.67, 0.67], gap="large")
+# ── Layout Definition ─────────────────────────────────────────────────────────
+hist_col, map_col = st.columns([1, 1.4], gap="large")
 
-with ctrl_col:
+with hist_col:
+    # Context section in two columns
+    ctx_col1, ctx_col2 = st.columns(2, gap="medium")
+    with ctx_col1:
+        st.markdown("**Context:** This dashboard tracks active thermal anomalies and cumulative burned area in Spain (sourced from NASA FIRMS and Copernicus EFFIS). While human ignitions—both negligent and intentional—remain the primary trigger,")
+    with ctx_col2:
+        st.markdown(" climate-driven fuel dryness, coupled with rural land abandonment and dense biomass accumulation, enables localized ignitions to rapidly escalate into uncontrollable, high-intensity megafires.")
+
+    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
+
     c1, c2 = st.columns(2)
     with c1:
         selected_date  = st.date_input("Start date:", datetime.date.today())
@@ -612,28 +614,31 @@ if effis_gdf is not None and not effis_gdf.empty:
             effis_total_ha = float(numeric_area.sum())
             break
 
-# ── Render KPIs (in the columns defined above) ───────────────────────────────
-with k1:
-    st.metric("Total Active Fires (High Conf.)", total_fires)
-    st.metric("Fires in Protected Areas", eco_fires)
-with k2:
-    st.metric("People within 5 km of Fires", f"{pop_kpis['exposed_pop']:,} people" if pop_kpis["exposed_pop"] else "—")
-    st.metric("Avg. Population at Fire Sites", f"{pop_kpis['mean_density']:.1f} people / ha" if pop_kpis["mean_density"] else "—")
-with k3:
-    st.metric("Total Burnt Area 2026 (EFFIS)", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
-    st.metric("Total EFFIS Fires (2026)", effis_count if effis_count else "—")
-
 # Global KPI font size reduction and robust Toggle CSS
 st.markdown("""
 <style>
-div[data-testid="stMetricValue"] {
-    font-size: 1.2rem !important;
+/* Style metrics inside rounded light grey boxes */
+div[data-testid="stMetric"] {
+    background-color: #F0F2F6 !important;
+    border-radius: 8px !important;
+    padding: 6px 12px !important;
+    margin-bottom: 4px !important;
+    border: 1px solid rgba(0, 0, 0, 0.05) !important;
 }
-div[data-testid="stMetricValue"] > div {
-    font-size: 1.2rem !important;
+
+div[data-testid="stMetricValue"],
+div[data-testid="stMetricValue"] * {
+    font-size: 1.5rem !important;
+    font-weight: 700 !important;
+    color: #666666 !important;
+    letter-spacing: -0.02em !important;
 }
 div[data-testid="stMetricLabel"] p {
-    font-size: 0.8rem !important;
+    font-size: 0.72rem !important;
+    font-weight: 500 !important;
+    color: #6c757d !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.04em !important;
 }
 
 /* Multiselect Tag Colors */
@@ -660,13 +665,9 @@ div[data-testid="stMultiSelect"] label {
     display: none !important;
 }
 div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
-    min-height: 40px !important;
-    max-height: 40px !important;
-    overflow: hidden !important;
-    padding-top: 4px !important;
-    padding-bottom: 4px !important;
     font-size: 0.85rem !important;
-    align-items: center !important;
+    padding-top: 2px !important;
+    padding-bottom: 2px !important;
 }
 span[data-baseweb="tag"] {
     height: 24px !important;
@@ -675,15 +676,25 @@ span[data-baseweb="tag"] {
     padding-right: 6px !important;
 }
 </style>
-""", unsafe_allow_html=True)
+""",unsafe_allow_html=True)
 
 # EFFIS burnt areas are now permanent
 show_effis = True
 
-# ── Map & Histogram Layout ────────────────────────────────────────────────────
-hist_col, map_col = st.columns([1, 1.4], gap="large")
-
 with map_col:
+    # ── Render KPIs centered on top of the map ────────────────────────────────
+    k1, k2, k3 = st.columns([1, 1, 1], gap="medium")
+    with k1:
+        st.metric("Total Active Fires (High Confidence)", total_fires)
+        st.metric("Fires in Protected Areas", eco_fires)
+    with k2:
+        st.metric("People within 5 km of Fires", f"{pop_kpis['exposed_pop']:,} " if pop_kpis["exposed_pop"] else "—")
+        st.metric("Avg. Population at Fire Sites", f"{pop_kpis['mean_density']:.1f} people / ha" if pop_kpis["mean_density"] else "—")
+    with k3:
+        st.metric("Total Burnt Area 2026 (EFFIS)", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
+        st.metric("Total EFFIS Fires (2026)", effis_count if effis_count else "—")
+
+    st.markdown("<div style='margin-top: 15px;'></div>", unsafe_allow_html=True)
     # ── Legend & Layer toggles ────────────────────────────────────────────────
     t_leg, t_layers = st.columns([2.1, 1.0], vertical_alignment="center")
     with t_leg:
@@ -694,7 +705,7 @@ with map_col:
             '<span style="color:#FD7F80; font-size: 1.1em; vertical-align: middle;">⬤</span> 24–48 h &nbsp;|&nbsp; '
             '<span style="color:#FBB3B4; font-size: 1.1em; vertical-align: middle;">⬤</span> 2–4 days &nbsp;|&nbsp; '
             '<span style="color:#F9DFE0; font-size: 1.1em; vertical-align: middle;">⬤</span> > 4 days &nbsp;|&nbsp; '
-            '<span style="display: inline-block; width: 14px; height: 12px; background-color: #B22222; vertical-align: middle; margin-right: 3px; border-radius: 1px;"></span> Burnt Areas'
+            '<span style="display: inline-block; width: 14px; height: 12px; background-color: #B22222; vertical-align: middle; margin-right: 3px; border-radius: 1px;"></span> Burnt Area 2026'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -808,7 +819,6 @@ with hist_col:
             monthly = monthly.sort_values("Month_Num")
             
             # Format X-axis and Y-axis for better readability
-            monthly["Month"] = monthly["Month_Num"].astype(str).str.zfill(2) + " - " + monthly["Month"]
             monthly["Area (x1000 ha)"] = monthly[area_c] / 1000.0
             
             # Render Altair bar chart with larger, readable fonts for both X and Y axes
@@ -819,6 +829,7 @@ with hist_col:
                     x=alt.X(
                         "Month:N",
                         title="Month",
+                        sort=monthly["Month"].tolist(),
                         axis=alt.Axis(labelFontSize=14, titleFontSize=15, labelAngle=0),
                     ),
                     y=alt.Y(
@@ -827,9 +838,19 @@ with hist_col:
                         axis=alt.Axis(labelFontSize=14, titleFontSize=15),
                     ),
                 )
-                .properties(height=450)
+                .properties(
+                    height=450,
+                    padding={"top": 30, "left": 15, "right": 15, "bottom": 15}
+                )
+                .configure_view(
+                    stroke=None,
+                    fill="#F0F2F6"
+                )
+                .configure(
+                    background="#F0F2F6"
+                )
             )
-            st.altair_chart(bar_chart_obj, width="stretch")
+            st.altair_chart(bar_chart_obj, width="stretch", theme=None)
         else:
             st.info("Monthly data not available.")
     else:
@@ -842,7 +863,7 @@ with hist_col:
         "<a href='https://www.worldpop.org/' style='color: gray; text-decoration: none;'>WorldPop</a> Population Data "
         "(<a href='https://creativecommons.org/licenses/by/4.0/' style='color: gray; text-decoration: none;'>CC BY 4.0</a> / "
         "<a href='https://opendatacommons.org/licenses/odbl/' style='color: gray; text-decoration: none;'>ODbL</a>) | "
-        "<a href='https://effis.jrc.ec.europa.eu/' style='color: gray; text-decoration: none;'>EFFIS 2026 (Copernicus EMS)</a> Burnt Areas"
+        "<a href='https://effis.jrc.ec.europa.eu/' style='color: gray; text-decoration: none;'>EFFIS 2026 (Copernicus EMS)</a> Burnt Areas."
         "</div>",
         unsafe_allow_html=True,
     )
@@ -874,10 +895,9 @@ with map_col:
                     "border": "1px solid rgba(255, 255, 255, 0.15)",
                 },
             },
-            height=680, # Larger square map height
+            # Remove manual height from pdk.Deck so it doesn't conflict with st.pydeck_chart height
         ),
-        # Automatically expand map width to fill the column container
-        use_container_width=True
+        height="stretch",
     )
     
 
