@@ -1,7 +1,7 @@
 """
-European & Mediterranean Wildfire Tracker — NASA FIRMS
+Spanish Wildfire Tracker — NASA FIRMS
 ======================================================
-Streamlit dashboard that visualises active fire detections across Europe
+Streamlit dashboard that visualises active fire detections across Spain
 using NASA FIRMS satellite data (VIIRS) and overlays Spanish protected
 natural areas (ENP) from MITECO GeoParquet files.  It also integrates a
 100 m population raster from WorldPop to compute fire-exposure KPIs,
@@ -17,11 +17,11 @@ Data sources
 """
 
 # ── Standard-library imports ──────────────────────────────────────────────────
+from streamlit.elements.lib import built_in_chart_utils
 import datetime                        # date arithmetic for date picker & FIRMS query window
 import hashlib                         # MD5 hash of fire data for caching KPI results
 import io                              # in-memory bytes buffer for reading EFFIS zip
 import json                            # convert GeoPandas GeoJSON strings into dicts for PyDeck
-import zipfile                         # extract EFFIS shapefile from downloaded zip archive
 from concurrent.futures import ThreadPoolExecutor  # background prefetch of heavy datasets
 from pathlib import Path               # cross-platform file-system path handling
 
@@ -29,7 +29,7 @@ from pathlib import Path               # cross-platform file-system path handlin
 import geopandas as gpd                # spatial joins & CRS reprojections (ENP layer)
 import numpy as np                     # vectorised array math (colors, population masks)
 import pandas as pd                    # DataFrames — core data structure throughout the app
-import pydeck as pdk                   # 3D WebGL map rendering inside Streamlit
+import pydeck as pdk                   # 3D WebGL map rendering inside Streamlit - the engine powering the entire interactive map- without it none of the ENP, burnt area or population map would render
 import rasterio                        # read the WorldPop population GeoTIFF raster
 import requests                        # HTTP client for downloading EFFIS burnt-area data
 from rasterio.enums import Resampling  # resampling strategy when downscaling the raster
@@ -39,7 +39,7 @@ import streamlit as st                 # the web-app framework that runs everyth
 
 # ── Page Configuration ────────────────────────────────────────────────────────
 # Must be the very first Streamlit command in the script.
-st.set_page_config(page_title="European & Mediterranean Wildfire Tracker", layout="wide")
+st.set_page_config(page_title="Spanish Wildfire Tracker", layout="wide")
 
 # NB: If I want to create a separate CSS style this way
 # def _inject_css(path: Path) -> None:
@@ -285,7 +285,7 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
             + " ha"
         )
     else:
-        gdf["tooltip_text"] = "Burnt Area (EFFIS 2026)"
+        gdf["tooltip_text"] = "2026 Burnt Area"
 
     # Cache to local parquet
     try:
@@ -560,8 +560,6 @@ europe_df["acq_datetime"] = pd.to_datetime(
 europe_df["tooltip_text"] = (
     "Fire Detection — Date: "
     + europe_df["acq_datetime"].dt.strftime("%Y-%m-%d %H:%M")
-    + " — Confidence: "
-    + europe_df["confidence"].astype(str)
 )
 
 europe_df = assign_colors(europe_df)
@@ -630,10 +628,10 @@ div[data-testid="stElementContainer"]:has(.enp-anchor) + div[data-testid="stElem
 
 /* Population Toggle */
 div[data-testid="stElementContainer"]:has(.pop-anchor) + div[data-testid="stElementContainer"] div[data-testid="stToggle"] input:checked + div {
-    background-color: #4A90E2 !important;
+    background-color: #9E7C97 !important;
 }
 div[data-testid="stElementContainer"]:has(.pop-anchor) + div[data-testid="stElementContainer"] div[data-testid="stWidgetLabel"] p {
-    color: #4A90E2 !important;
+    color: #9E7C97 !important;
     font-weight: 500;
 }
 </style>
@@ -643,20 +641,20 @@ div[data-testid="stElementContainer"]:has(.pop-anchor) + div[data-testid="stElem
 show_effis = True
 
 # ── Map & Histogram Layout ────────────────────────────────────────────────────
-hist_col, map_col = st.columns([1, 2], gap="large")
+hist_col, map_col = st.columns([1, 1.4], gap="large")
 
 with map_col:
     # ── Legend & Layer toggles ────────────────────────────────────────────────
-    t_leg, t1, t2 = st.columns([2.8, 1, 1])
+    t_leg, t1, t2 = st.columns([2.8, 1, 1], vertical_alignment="center")
     with t_leg:
         st.markdown(
-            "<div style='margin-top: 10px; margin-bottom: 0px; font-size: 0.85em;'>"
+            "<div style='margin: 0px; font-size: 0.85em; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;'>"
             "<b>Legend:</b> "
-            '<span style="color:#8B0000">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
-            '<span style="color:#FF0000">⬤</span> 24–48 h &nbsp;|&nbsp; '
-            '<span style="color:#FFA500">⬤</span> 2–4 days &nbsp;|&nbsp; '
-            '<span style="color:#FFFF00">⬤</span> > 4 days &nbsp;|&nbsp; '
-            '<span style="color:#B22222">■</span> Burnt Areas (EFFIS 2026, Synchronous)'
+            '<span style="color:#8B0000; font-size: 1.1em; vertical-align: middle;">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
+            '<span style="color:#FF0000; font-size: 1.1em; vertical-align: middle;">⬤</span> 24–48 h &nbsp;|&nbsp; '
+            '<span style="color:#FFA500; font-size: 1.1em; vertical-align: middle;">⬤</span> 2–4 days &nbsp;|&nbsp; '
+            '<span style="color:#FFFF00; font-size: 1.1em; vertical-align: middle;">⬤</span> > 4 days &nbsp;|&nbsp; '
+            '<span style="display: inline-block; width: 14px; height: 12px; background-color: #B22222; vertical-align: middle; margin-right: 3px; border-radius: 1px;"></span> Burnt Areas'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -777,27 +775,45 @@ with hist_col:
     # Data sources below the bar chart
     st.markdown(
         "<div style='margin-top: 15px; margin-bottom: 0px; font-size: 0.75em; color: gray; line-height: 1.4;'>"
-        "<b>Data sources:</b> NASA FIRMS (VIIRS) | MITECO (Protected Natural Areas) | "
+        "<b>Data sources:</b> NASA FIRMS (VIIRS active fires filtered for nominal/high confidence) | MITECO (Protected Natural Areas) | "
         "<a href='https://www.worldpop.org/' style='color: gray; text-decoration: none;'>WorldPop</a> Population Data "
         "(<a href='https://creativecommons.org/licenses/by/4.0/' style='color: gray; text-decoration: none;'>CC BY 4.0</a> / "
         "<a href='https://opendatacommons.org/licenses/odbl/' style='color: gray; text-decoration: none;'>ODbL</a>) | "
-        "<a href='https://effis.jrc.ec.europa.eu/' style='color: gray; text-decoration: none;'>EFFIS / Copernicus EMS</a> Burnt Areas"
+        "<a href='https://effis.jrc.ec.europa.eu/' style='color: gray; text-decoration: none;'>EFFIS 2026 (Copernicus EMS)</a> Burnt Areas"
         "</div>",
         unsafe_allow_html=True,
     )
 
+# ── Map Rendering (Right Column) ──────────────────────────────────────────────
+# Render the main WebGL interactive map using PyDeck inside the right layout column.
 with map_col:
     st.pydeck_chart(
         pdk.Deck(
+            # 'layers' contains all active map layers (Scatterplot fire dots, ENP polygons, EFFIS burnt areas, Heatmap)
             layers=layers,
+            # Initial camera position centered over Spain (lat: 40.0, lon: -3.0) at zoom level 5
+            # pitch=0 sets a flat top-down 2D perspective (increase pitch to e.g. 45 for 3D tilt)
             initial_view_state=pdk.ViewState(
                 latitude=40.0, longitude=-3.0, zoom=5, pitch=0
             ),
+            # Interactive hover tooltip styling — displays formatted text when hovering over data features
             tooltip={
                 "html": "{tooltip_text}",
-                "style": {"backgroundColor": "steelblue", "color": "white"},
+                "style": {
+                    "backgroundColor": "darkgrey",
+                    "color": "white",
+                    "fontFamily": "'Arial', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+                    "fontSize": "14px",
+                    "fontWeight": "500",
+                    "borderRadius": "8px",
+                    "padding": "8px 12px",
+                    "boxShadow": "0 10px 15px -3px rgba(0, 0, 0, 0.3)",
+                    "border": "1px solid rgba(255, 255, 255, 0.15)",
+                },
             },
+            height=680, # Larger square map height
         ),
+        # Automatically expand map width to fill the column container
         use_container_width=True
     )
     
