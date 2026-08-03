@@ -1,5 +1,5 @@
 """
-Spanish Wildfire Tracker — NASA FIRMS
+Spanish Wildfire Tracker
 ======================================================
 Streamlit dashboard that visualises active fire detections across Spain
 using NASA FIRMS satellite data (VIIRS) and overlays Spanish protected
@@ -26,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor  # background prefetch of heav
 from pathlib import Path               # cross-platform file-system path handling
 
 # ── Third-party imports ───────────────────────────────────────────────────────
+import altair as alt                   # customized chart axes and font sizes
 import geopandas as gpd                # spatial joins & CRS reprojections (ENP layer)
 import numpy as np                     # vectorised array math (colors, population masks)
 import pandas as pd                    # DataFrames — core data structure throughout the app
@@ -51,6 +52,13 @@ st.set_page_config(page_title="Spanish Wildfire Tracker", layout="wide")
 st.markdown(
     """
     <style>
+    /* Very light gray background */
+    .stApp,
+    [data-testid="stAppViewContainer"],
+    [data-testid="stHeader"] {
+        background-color: #F8F9FA !important;
+    }
+
     /* Hide the Deploy button */
     [data-testid="stAppDeployButton"],
     .stAppDeployButton { display: none !important; }
@@ -461,11 +469,11 @@ def compute_population_kpis(fire_hash: str, _fires_df: pd.DataFrame) -> dict[str
 # ── Color assignment (vectorised) ─────────────────────────────────────────────
 
 _COLOR_BINS = [
-    (pd.Timedelta(hours=24), [139, 0,   0, 200]),   # Dark Red  — ≤ 24 h
-    (pd.Timedelta(days=2),   [255, 0,   0, 200]),    # Red       — 24–48 h
-    (pd.Timedelta(days=4),   [255, 165, 0, 200]),    # Orange    — 2–4 days
+    (pd.Timedelta(hours=24), [255, 75, 75, 255]),    # Streamlit Coral Red (Solid) — ≤ 24 h
+    (pd.Timedelta(days=2),   [253, 127, 128, 255]),  # Coral Red lightened (~70%)  — 24–48 h
+    (pd.Timedelta(days=4),   [251, 179, 180, 255]),  # Coral Red lightened (~40%)  — 2–4 days
 ]
-_DEFAULT_COLOR = [255, 255, 0, 200]                    # Yellow    — > 4 days
+_DEFAULT_COLOR = [249, 223, 224, 255]                # Coral Red lightened (~15%)  — > 4 days (softest)
 
 
 def assign_colors(df: pd.DataFrame) -> pd.DataFrame:
@@ -517,7 +525,7 @@ st.markdown("""
     footer {visibility: hidden;} /* Hide default Streamlit footer to prevent vertical scrolling */
     </style>
 """, unsafe_allow_html=True)
-st.markdown("#### Spanish Wildfire Tracker — NASA FIRMS")
+st.markdown("#### Spanish Wildfire Tracker  ")
 st.markdown(
     "**Context:** This dashboard tracks active thermal anomalies and cumulative burned area in Spain (sourced from NASA FIRMS and Copernicus EFFIS)."
     " While human ignitions—both negligent and intentional—remain the primary trigger, climate-driven fuel dryness, coupled with rural land abandonment and dense biomass accumulation, enables localized ignitions to rapidly escalate into uncontrollable, high-intensity megafires.   "
@@ -530,13 +538,24 @@ st.markdown(
 ctrl_col, k1, k2, k3 = st.columns([1, 0.67, 0.67, 0.67], gap="large")
 
 with ctrl_col:
-    selected_date  = st.date_input("End date:", datetime.date.today())
-    selected_range = st.slider("Days to look back:", min_value=1, max_value=3, value=3)
+    c1, c2 = st.columns(2)
+    with c1:
+        selected_date  = st.date_input("Start date:", datetime.date.today())
 
-# Decide FIRMS dataset: SP for data older than 30 days, NRT otherwise
-start_date      = selected_date - datetime.timedelta(days=selected_range - 1)
-days_from_today = (datetime.date.today() - selected_date).days
-source          = "VIIRS_SNPP_SP" if days_from_today > 30 else "VIIRS_SNPP_NRT"
+    with c2:
+        # Decide FIRMS dataset: SP for data older than 30 days, NRT otherwise
+        days_from_today = (datetime.date.today() - selected_date).days
+        source          = "VIIRS_SNPP_SP" if days_from_today > 30 else "VIIRS_SNPP_NRT"
+        max_days        = 5   # NASA FIRMS Area API limit per request
+
+        day_options = list(range(1, max_days + 1))
+        selected_range = st.select_slider(
+            "Date range (days):",
+            options=day_options,
+            value=min(3, max_days),
+        )
+
+start_date = selected_date - datetime.timedelta(days=selected_range - 1)
 
 # ── Fetch fire data ───────────────────────────────────────────────────────────
 europe_df = fetch_europe_fires(
@@ -617,22 +636,43 @@ div[data-testid="stMetricLabel"] p {
     font-size: 0.8rem !important;
 }
 
-/* Protected Areas Toggle */
-div[data-testid="stElementContainer"]:has(.enp-anchor) + div[data-testid="stElementContainer"] div[data-testid="stToggle"] input:checked + div {
-    background-color: #6B8E23 !important;
-}
-div[data-testid="stElementContainer"]:has(.enp-anchor) + div[data-testid="stElementContainer"] div[data-testid="stWidgetLabel"] p {
-    color: #6B8E23 !important;
-    font-weight: 500;
+/* Multiselect Tag Colors */
+span[data-baseweb="tag"]:has(span[title="Protected Areas"]) {
+    background-color: #dcedc8 !important; /* Light green */
 }
 
-/* Population Toggle */
-div[data-testid="stElementContainer"]:has(.pop-anchor) + div[data-testid="stElementContainer"] div[data-testid="stToggle"] input:checked + div {
-    background-color: #9E7C97 !important;
+span[data-baseweb="tag"]:has(span[title="Population"]) {
+    background-color: #d1c4e9 !important; /* Light blue-lilac */
 }
-div[data-testid="stElementContainer"]:has(.pop-anchor) + div[data-testid="stElementContainer"] div[data-testid="stWidgetLabel"] p {
-    color: #9E7C97 !important;
-    font-weight: 500;
+
+span[data-baseweb="tag"] span,
+span[data-baseweb="tag"] svg {
+    color: #000000 !important;
+    fill: #000000 !important;
+}
+
+/* Compact Multiselect Layer Menu & Vertical Alignment */
+div[data-testid="stMultiSelect"] {
+    margin-top: 0px !important;
+    margin-bottom: 0px !important;
+}
+div[data-testid="stMultiSelect"] label {
+    display: none !important;
+}
+div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
+    min-height: 40px !important;
+    max-height: 40px !important;
+    overflow: hidden !important;
+    padding-top: 4px !important;
+    padding-bottom: 4px !important;
+    font-size: 0.85rem !important;
+    align-items: center !important;
+}
+span[data-baseweb="tag"] {
+    height: 24px !important;
+    font-size: 0.78rem !important;
+    padding-left: 6px !important;
+    padding-right: 6px !important;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -645,25 +685,29 @@ hist_col, map_col = st.columns([1, 1.4], gap="large")
 
 with map_col:
     # ── Legend & Layer toggles ────────────────────────────────────────────────
-    t_leg, t1, t2 = st.columns([2.8, 1, 1], vertical_alignment="center")
+    t_leg, t_layers = st.columns([2.1, 1.0], vertical_alignment="center")
     with t_leg:
         st.markdown(
             "<div style='margin: 0px; font-size: 0.85em; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;'>"
             "<b>Legend:</b> "
-            '<span style="color:#8B0000; font-size: 1.1em; vertical-align: middle;">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
-            '<span style="color:#FF0000; font-size: 1.1em; vertical-align: middle;">⬤</span> 24–48 h &nbsp;|&nbsp; '
-            '<span style="color:#FFA500; font-size: 1.1em; vertical-align: middle;">⬤</span> 2–4 days &nbsp;|&nbsp; '
-            '<span style="color:#FFFF00; font-size: 1.1em; vertical-align: middle;">⬤</span> > 4 days &nbsp;|&nbsp; '
+            '<span style="color:#FF4B4B; font-size: 1.1em; vertical-align: middle;">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
+            '<span style="color:#FD7F80; font-size: 1.1em; vertical-align: middle;">⬤</span> 24–48 h &nbsp;|&nbsp; '
+            '<span style="color:#FBB3B4; font-size: 1.1em; vertical-align: middle;">⬤</span> 2–4 days &nbsp;|&nbsp; '
+            '<span style="color:#F9DFE0; font-size: 1.1em; vertical-align: middle;">⬤</span> > 4 days &nbsp;|&nbsp; '
             '<span style="display: inline-block; width: 14px; height: 12px; background-color: #B22222; vertical-align: middle; margin-right: 3px; border-radius: 1px;"></span> Burnt Areas'
             "</div>",
             unsafe_allow_html=True,
         )
-    with t1:
-        st.markdown('<div class="enp-anchor"></div>', unsafe_allow_html=True)
-        show_enp = st.toggle("Show Protected Areas", value=False)
-    with t2:
-        st.markdown('<div class="pop-anchor"></div>', unsafe_allow_html=True)
-        show_pop = st.toggle("Show Population", value=False)
+    with t_layers:
+        selected_layers = st.multiselect(
+            "Extra Layers",
+            options=["Protected Areas", "Population"],
+            default=[],
+            label_visibility="collapsed",
+            placeholder="Add layers..."
+        )
+        show_enp = "Protected Areas" in selected_layers
+        show_pop = "Population" in selected_layers
 
 # ── Build map layers ──────────────────────────────────────────────────────────
 layers: list[pdk.Layer] = []
@@ -674,12 +718,11 @@ layers.append(
         "ScatterplotLayer",
         data=europe_df,
         get_position="[longitude, latitude]",
-        get_color="color_rgba",
+        get_fill_color="color_rgba",
         get_radius=1000,
         radius_min_pixels=4,
         radius_max_pixels=8,
         pickable=True,
-        opacity=0.8,
         filled=True,
     )
 )
@@ -734,8 +777,11 @@ if show_pop:
                 threshold=0.05,
                 opacity=0.6,
                 color_range=[
-                    [0, 0, 128], [0, 128, 255], [0, 255, 128],
-                    [255, 255, 0], [255, 128, 0], [255, 0, 0],
+                    [240, 248, 255],  # White / Ice Blue (lowest density)
+                    [125, 211, 252],  # Light Blue
+                    [14, 165, 233],   # Electric Blue
+                    [124, 58, 237],   # Electric Purple
+                    [91, 33, 182],    # Deep Purple (highest density)
                 ],
             ),
         )
@@ -765,8 +811,25 @@ with hist_col:
             monthly["Month"] = monthly["Month_Num"].astype(str).str.zfill(2) + " - " + monthly["Month"]
             monthly["Area (x1000 ha)"] = monthly[area_c] / 1000.0
             
-            # Properly specify x and y, and limit height to avoid vertical scrolling
-            st.bar_chart(monthly, x="Month", y="Area (x1000 ha)", color="#B22222", height=450)
+            # Render Altair bar chart with larger, readable fonts for both X and Y axes
+            bar_chart_obj = (
+                alt.Chart(monthly)
+                .mark_bar(color="#B22222")
+                .encode(
+                    x=alt.X(
+                        "Month:N",
+                        title="Month",
+                        axis=alt.Axis(labelFontSize=14, titleFontSize=15, labelAngle=0),
+                    ),
+                    y=alt.Y(
+                        "Area (x1000 ha):Q",
+                        title="Area (x1000 ha)",
+                        axis=alt.Axis(labelFontSize=14, titleFontSize=15),
+                    ),
+                )
+                .properties(height=450)
+            )
+            st.altair_chart(bar_chart_obj, width="stretch")
         else:
             st.info("Monthly data not available.")
     else:
