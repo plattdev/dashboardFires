@@ -608,7 +608,7 @@ with hist_col:
 
     c1, c2 = st.columns(2)
     with c1:
-        selected_date  = st.date_input("Start date:", datetime.date.today())
+        selected_date  = st.date_input("Detection date:", datetime.date.today())
 
     with c2:
         # Decide FIRMS dataset: SP for data older than 30 days, NRT otherwise
@@ -618,7 +618,7 @@ with hist_col:
 
         day_options = list(range(1, max_days + 1))
         selected_range = st.select_slider(
-            "Date range (days):",
+            "Number of days past detection:",
             options=day_options,
             value=min(3, max_days),
         )
@@ -833,24 +833,29 @@ with hist_col:
                 .encode(
                     x=alt.X(
                         "Month:N",
-                        title="Month",
+                        title=None,
                         sort=monthly["Month"].tolist(),
-                        axis=alt.Axis(labelFontSize=14, titleFontSize=15, labelAngle=0),
+                        axis=alt.Axis(
+                            labelFontSize=12,
+                            titleFontSize=13,
+                            labelAngle=-45,
+                            labelLimit=80,
+                        ),
                     ),
                     y=alt.Y(
                         "Area (x1000 ha):Q",
                         title="Area (x1000 ha)",
-                        axis=alt.Axis(labelFontSize=14, titleFontSize=15),
+                        axis=alt.Axis(labelFontSize=12, titleFontSize=13),
                     ),
                 )
                 .properties(
-                    height=450,
-                    padding={"top": 30, "left": 15, "right": 15, "bottom": 15}
+                    height=400,
+                    padding={"top": 20, "left": 15, "right": 15, "bottom": 30}
                 )
                 .configure_view(stroke=None, fill="#F0F2F6")
                 .configure(background="#F0F2F6")
             )
-            st.altair_chart(bar_chart_obj, width="stretch", theme=None)
+            st.altair_chart(bar_chart_obj, use_container_width=True, theme=None)
         else:
             st.info("Monthly data not available.")
     else:
@@ -869,6 +874,24 @@ with hist_col:
     )
 
 # ── Map Rendering (Right Column) ──────────────────────────────────────────────
+# Inject CSS so the pydeck iframe fills available height on all screen sizes.
+# On desktop the right column stretches to the viewport; on mobile (< 768 px)
+# Streamlit stacks columns vertically so we force a min-height via vh units.
+st.markdown("""
+<style>
+/* Target the iframe that pydeck injects */
+[data-testid="stDeckGlJsonChart"] iframe {
+    min-height: 480px;
+}
+@media (max-width: 768px) {
+    [data-testid="stDeckGlJsonChart"] iframe {
+        min-height: 75vh !important;
+        height: 75vh !important;
+    }
+}
+</style>
+""", unsafe_allow_html=True)
+
 with map_col:
     st.pydeck_chart(
         pdk.Deck(
@@ -891,5 +914,6 @@ with map_col:
                 },
             },
         ),
-        height="stretch",
+        use_container_width=True,
+        height=600,
     )
