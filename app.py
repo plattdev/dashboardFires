@@ -393,6 +393,7 @@ def fetch_europe_fires(api_key: str, start_date: str, day_range: int, source: st
     ----------
     api_key    : NASA FIRMS MAP_KEY (from .streamlit/secrets.toml).
     start_date : ISO date string (YYYY-MM-DD) for the query start.
+                 Always anchored on yesterday or earlier so NRT data exists.
     day_range  : Number of days forward from start_date.
     source     : FIRMS dataset id ('VIIRS_SNPP_NRT' or 'VIIRS_SNPP_SP').
 
@@ -622,15 +623,21 @@ with hist_col:
             value=min(3, max_days),
         )
 
-start_date = selected_date - datetime.timedelta(days=selected_range - 1)
+# FIRMS NRT data has ~1 day latency — data for *today* is never available yet.
+# Anchor the end of the window on yesterday (or selected_date if it's in the past).
+yesterday = datetime.date.today() - datetime.timedelta(days=1)
+end_date = min(selected_date, yesterday)
+start_date = end_date - datetime.timedelta(days=selected_range - 1)
+start_date_str = start_date.strftime("%Y-%m-%d")
 
 # ── Fetch fire data ───────────────────────────────────────────────────────────
 europe_df = fetch_europe_fires(
     st.secrets["FIRMS_API_KEY"],
-    start_date.strftime("%Y-%m-%d"),
+    start_date_str,
     selected_range,
     source,
 )
+
 
 if europe_df.empty:
     st.warning("No fire data available for the selected date range.")
