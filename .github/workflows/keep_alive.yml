@@ -15,5 +15,5 @@ jobs:
           # Replace with your actual Streamlit Cloud app URL
           URL="https://dashboardfires.streamlit.app"
           echo "Pinging $URL to prevent hibernation..."
-          curl -sL -o /dev/null -w "%{http_code}\n" "$URL"
+          curl -c cookies.txt -b cookies.txt -sL -o /dev/null -w "%{http_code}\n" "$URL"
 
