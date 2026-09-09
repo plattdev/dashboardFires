@@ -606,29 +606,39 @@ with hist_col:
 
     st.markdown("<div class='spacer-sm'></div>", unsafe_allow_html=True)
 
+    # ── Date range picker ────────────────────────────────────────────────────
+    # NASA FIRMS API allows a maximum window of 5 days per request.
+    # NRT data has ~1-day latency, so "yesterday" is the latest available date.
+    _max_range_days = 5
+    _yesterday = datetime.date.today() - datetime.timedelta(days=1)
+    _default_from = _yesterday - datetime.timedelta(days=2)  # 3-day window
+
     c1, c2 = st.columns(2)
     with c1:
-        selected_date  = st.date_input("Detection date:", datetime.date.today())
-
+        from_date = st.date_input(
+            "From:",
+            value=_default_from,
+            max_value=_yesterday,
+            help="Earliest detection date to show.",
+        )
     with c2:
-        # Decide FIRMS dataset: SP for data older than 30 days, NRT otherwise
-        days_from_today = (datetime.date.today() - selected_date).days
-        source          = "VIIRS_SNPP_SP" if days_from_today > 30 else "VIIRS_SNPP_NRT"
-        max_days        = 5   # NASA FIRMS Area API limit per request
-
-        day_options = list(range(1, max_days + 1))
-        selected_range = st.select_slider(
-            "Number of days past detection:",
-            options=day_options,
-            value=min(3, max_days),
+        # Clamp the max selectable "To" date so the range never exceeds 5 days
+        _max_to = min(from_date + datetime.timedelta(days=_max_range_days - 1), _yesterday)
+        to_date = st.date_input(
+            "To:",
+            value=_max_to,
+            min_value=from_date,
+            max_value=_max_to,
+            help=f"Latest detection date (max {_max_range_days}-day window).",
         )
 
-# FIRMS NRT data has ~1 day latency — data for *today* is never available yet.
-# Anchor the end of the window on yesterday (or selected_date if it's in the past).
-yesterday = datetime.date.today() - datetime.timedelta(days=1)
-end_date = min(selected_date, yesterday)
-start_date = end_date - datetime.timedelta(days=selected_range - 1)
-start_date_str = start_date.strftime("%Y-%m-%d")
+    # Compute the day span and FIRMS source from the two dates
+    selected_range = (to_date - from_date).days + 1          # inclusive
+    days_from_today = (datetime.date.today() - from_date).days
+    source = "VIIRS_SNPP_SP" if days_from_today > 30 else "VIIRS_SNPP_NRT"
+
+    start_date = from_date
+    start_date_str = start_date.strftime("%Y-%m-%d")
 
 # ── Fetch fire data ───────────────────────────────────────────────────────────
 europe_df = fetch_europe_fires(
