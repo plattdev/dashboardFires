@@ -307,29 +307,8 @@ def _open_population_raster() -> rasterio.DatasetReader | None:
     return rasterio.open(POPULATION_TIFF)
 
 
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
-    """Download the EFFIS current-season burnt-area shapefile from JRC.
-
-    Downloads the zip archive, reads the shapefile with GeoPandas,
-    filters for Spain (COUNTRY_CODE == 'ES') in 2026, and reprojects to
-    EPSG:4326 for map display. Caches to local parquet for fast subsequent loads.
-
-    Returns
-    -------
-    gpd.GeoDataFrame in EPSG:4326 with burnt-area polygons, or None on error.
-    """
-    cache_path = DATA_DIR / "effis_burnt_areas_2026.parquet"
-    cached_gdf: gpd.GeoDataFrame | None = None
-    if cache_path.exists():
-        try:
-            cached_gdf = gpd.read_parquet(cache_path)
-            cache_age = time.time() - cache_path.stat().st_mtime
-            if cache_age < _EFFIS_CACHE_TTL_SECONDS:
-                return cached_gdf
-        except Exception:
-            cached_gdf = None
-
+def _refresh_effis_parquet(cache_path: Path) -> None:
+    """Download the latest EFFIS current-season burnt-area shapefile and save to parquet."""
     url = (
         "https://maps.effis.emergency.copernicus.eu/effis"
         "?service=WFS&request=getfeature&typename=ms:modis.ba.poly"
@@ -342,15 +321,13 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
     try:
         resp = requests.get(url, headers=headers, timeout=120)
         resp.raise_for_status()
-
-        # Read directly from the zip archive in memory
         gdf = gpd.read_file(io.BytesIO(resp.content))
     except Exception as exc:
         print(f"Error fetching EFFIS data: {exc}")
-        return cached_gdf
+        return
 
     if gdf.empty:
-        return cached_gdf
+        return
 
     # Filter for Spain
     country_col = _first_matching_col(gdf, _EFFIS_COUNTRY_COLS)
@@ -364,7 +341,7 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
         gdf = gdf[gdf[date_col] >= "2026-01-01"]
 
     if gdf.empty:
-        return cached_gdf
+        return
 
     # Reproject to WGS-84 for PyDeck
     if gdf.crs and gdf.crs.to_epsg() != 4326:
@@ -390,7 +367,6 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
     try:
         if date_col is not None:
             gdf[date_col] = gdf[date_col].astype(str)
-        # Convert any other problematic columns to string if necessary
         for col in gdf.columns:
             if col not in ["geometry", "tooltip_text", area_col, country_col]:
                 gdf[col] = gdf[col].astype(str)
@@ -398,13 +374,45 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
     except Exception as exc:
         print(f"Warning: could not cache EFFIS data to parquet: {exc}")
 
-    return gdf
+
+def _get_effis_cache_mtime() -> float:
+    """Ensure the EFFIS parquet cache is fresh (< 24 h) and return its mtime.
+
+    Passing this mtime into @st.cache_data functions guarantees that Streamlit
+    invalidates its in-memory cache immediately whenever the parquet updates.
+    """
+    cache_path = DATA_DIR / "effis_burnt_areas_2026.parquet"
+    needs_refresh = (
+        not cache_path.exists()
+        or (time.time() - cache_path.stat().st_mtime) >= _EFFIS_CACHE_TTL_SECONDS
+    )
+    if needs_refresh:
+        _refresh_effis_parquet(cache_path)
+    return round(cache_path.stat().st_mtime, 2) if cache_path.exists() else 0.0
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def build_effis_geojson() -> dict | None:
+def fetch_effis_burnt_areas(cache_mtime: float = 0.0) -> gpd.GeoDataFrame | None:
+    """Load the EFFIS current-season burnt-area GeoDataFrame for Spain (EPSG:4326).
+
+    Keyed on cache_mtime so any update to the local parquet file immediately
+    refreshes the histogram, KPIs, and map layers.
+    """
+    cache_path = DATA_DIR / "effis_burnt_areas_2026.parquet"
+    if not cache_path.exists():
+        _refresh_effis_parquet(cache_path)
+    if cache_path.exists():
+        try:
+            return gpd.read_parquet(cache_path)
+        except Exception as exc:
+            print(f"Error reading EFFIS parquet cache: {exc}")
+    return None
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def build_effis_geojson(cache_mtime: float = 0.0) -> dict | None:
     """Serialize the EFFIS burnt-area GeoDataFrame to a cached GeoJSON dict."""
-    effis_gdf = fetch_effis_burnt_areas()
+    effis_gdf = fetch_effis_burnt_areas(cache_mtime)
     if effis_gdf is None or effis_gdf.empty:
         return None
     return json.loads(effis_gdf.to_json())
@@ -419,6 +427,41 @@ def get_effis_last_fire_date(effis_gdf: gpd.GeoDataFrame | None) -> datetime.dat
         return None
     max_ts = pd.to_datetime(effis_gdf[date_col], errors="coerce").max()
     return None if pd.isna(max_ts) else max_ts.date()
+
+
+def _extract_effis_fires_for_window(
+    effis_gdf: gpd.GeoDataFrame | None,
+    from_date: datetime.date,
+    to_date: datetime.date,
+) -> pd.DataFrame:
+    """Extract EFFIS fire events falling within [from_date, to_date] as point detections.
+
+    Used when NASA FIRMS NRT has no nominal/high VIIRS detections for a date window
+    where EFFIS has confirmed wildfires in Spain (e.g. smaller autumn/winter fires),
+    so active-fire KPIs and map points stay consistent with EFFIS records.
+    """
+    if effis_gdf is None or effis_gdf.empty:
+        return pd.DataFrame()
+
+    date_col = _first_matching_col(effis_gdf, _EFFIS_DATE_COLS)
+    if not date_col:
+        return pd.DataFrame()
+
+    dt_series = pd.to_datetime(effis_gdf[date_col], errors="coerce")
+    mask = (dt_series.dt.date >= from_date) & (dt_series.dt.date <= to_date)
+    subset = effis_gdf.loc[mask]
+    if subset.empty:
+        return pd.DataFrame()
+
+    rep_pts = subset.geometry.representative_point()
+    acq_dt = dt_series.loc[mask]
+    return pd.DataFrame({
+        "latitude": rep_pts.y.to_numpy(dtype=np.float64),
+        "longitude": rep_pts.x.to_numpy(dtype=np.float64),
+        "acq_date": acq_dt.dt.strftime("%Y-%m-%d").to_numpy(),
+        "acq_time": acq_dt.dt.strftime("%H%M").to_numpy(),
+        "confidence": "high",
+    })
 
 
 # ── FIRMS API Loader ──────────────────────────────────────────────────────────
@@ -469,43 +512,44 @@ def fetch_europe_fires(api_key: str, start_date: str, day_range: int, source: st
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def find_last_fire_date(api_key: str, yesterday: datetime.date) -> datetime.date:
+def find_last_fire_date(
+    api_key: str,
+    yesterday: datetime.date,
+    effis_mtime: float = 0.0,
+) -> datetime.date:
     """Determine the most recent date with recorded fire activity in Spain.
 
-    Checks NASA FIRMS recent detections first, then falls back to the latest
-    recorded wildfire date in the EFFIS 2026 dataset so the calendar always
-    defaults to an informative 'To' date even during winter.
+    Checks both NASA FIRMS recent detections and the EFFIS 2026 dataset,
+    returning whichever has the most recent Spanish wildfire date (<= yesterday).
     """
-    # 1. Check the latest 5-day window ending on yesterday
+    candidates: list[datetime.date] = []
+
+    # 1. Latest Spanish wildfire recorded in EFFIS (2026 season)
+    effis_last = get_effis_last_fire_date(fetch_effis_burnt_areas(effis_mtime))
+    if effis_last is not None:
+        candidates.append(min(effis_last, yesterday))
+
+    # 2. Check the latest 5-day window ending on yesterday in NASA FIRMS
     recent_start = (yesterday - datetime.timedelta(days=_FIRMS_MAX_DAYS - 1)).strftime("%Y-%m-%d")
     recent_df = fetch_europe_fires(api_key, recent_start, _FIRMS_MAX_DAYS, "VIIRS_SNPP_NRT")
     if not recent_df.empty:
         spain_recent = filter_spain(recent_df)
         if not spain_recent.empty:
-            return min(pd.to_datetime(spain_recent["acq_date"]).max().date(), yesterday)
+            candidates.append(min(pd.to_datetime(spain_recent["acq_date"]).max().date(), yesterday))
 
-    # 2. Query FIRMS dateless endpoint for the latest 5 days available on server
-    latest_url = (
-        f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
-        f"{api_key}/VIIRS_SNPP_NRT/{_FIRMS_BBOX}/{_FIRMS_MAX_DAYS}"
-    )
-    latest_df = _read_firms_csv(latest_url)
-    if not latest_df.empty:
-        spain_latest = filter_spain(latest_df)
-        if not spain_latest.empty:
-            return min(pd.to_datetime(spain_latest["acq_date"]).max().date(), yesterday)
+    # 3. Query FIRMS dateless endpoint for the latest 5 days available on server
+    if not candidates:
+        latest_url = (
+            f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
+            f"{api_key}/VIIRS_SNPP_NRT/{_FIRMS_BBOX}/{_FIRMS_MAX_DAYS}"
+        )
+        latest_df = _read_firms_csv(latest_url)
+        if not latest_df.empty:
+            spain_latest = filter_spain(latest_df)
+            if not spain_latest.empty:
+                candidates.append(min(pd.to_datetime(spain_latest["acq_date"]).max().date(), yesterday))
 
-    # 3. Fall back to the latest Spanish wildfire recorded in EFFIS (2026 season)
-    effis_last = get_effis_last_fire_date(fetch_effis_burnt_areas())
-    if effis_last is not None:
-        return min(effis_last, yesterday)
-
-    if not recent_df.empty:
-        return min(pd.to_datetime(recent_df["acq_date"]).max().date(), yesterday)
-    if not latest_df.empty:
-        return min(pd.to_datetime(latest_df["acq_date"]).max().date(), yesterday)
-
-    return yesterday
+    return max(candidates) if candidates else yesterday
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -694,13 +738,19 @@ st.markdown("#### Spanish Wildfire Tracker  ")
 # automatically to the date of the last recorded fire.
 _yesterday = datetime.date.today() - datetime.timedelta(days=1)
 _api_key = st.secrets["FIRMS_API_KEY"]
-_last_fire_date = find_last_fire_date(_api_key, _yesterday)
+_effis_mtime = _get_effis_cache_mtime()
+effis_gdf = fetch_effis_burnt_areas(_effis_mtime)
+_last_fire_date = find_last_fire_date(_api_key, _yesterday, _effis_mtime)
 _default_to = _last_fire_date
 _default_from = _default_to - datetime.timedelta(days=2)  # 3-day window
 
-if "from_date" not in st.session_state:
+if (
+    "from_date" not in st.session_state
+    or "to_date" not in st.session_state
+    or st.session_state.get("_last_fire_anchor") != _last_fire_date
+):
+    st.session_state["_last_fire_anchor"] = _last_fire_date
     st.session_state["from_date"] = _default_from
-if "to_date" not in st.session_state:
     st.session_state["to_date"] = _default_to
 
 
@@ -762,13 +812,24 @@ with hist_col:
     source = "VIIRS_SNPP_SP" if days_from_today > 30 else "VIIRS_SNPP_NRT"
     start_date_str = from_date.strftime("%Y-%m-%d")
 
-# ── Fetch fire data ───────────────────────────────────────────────────────────
+# ── Fetch fire data (with EFFIS fallback for confirmed Spanish fires) ────────
 europe_df = fetch_europe_fires(
     _api_key,
     start_date_str,
     selected_range,
     source,
 )
+
+# If FIRMS has no Spanish detections in the window but EFFIS recorded fires on
+# those dates, supplement with the EFFIS fire centroids so KPIs and map update.
+if filter_spain(europe_df).empty:
+    effis_window_df = _extract_effis_fires_for_window(effis_gdf, from_date, to_date)
+    if not effis_window_df.empty:
+        europe_df = (
+            pd.concat([europe_df, effis_window_df], ignore_index=True)
+            if not europe_df.empty
+            else effis_window_df
+        )
 
 # ── Prepare fire DataFrame & Spain-only subset for KPIs ──────────────────────
 if not europe_df.empty:
@@ -827,7 +888,6 @@ with hist_col:
         )
 
 # ── EFFIS burnt-area KPI ──────────────────────────────────────────────────────
-effis_gdf = fetch_effis_burnt_areas()
 effis_total_ha = 0.0
 effis_count = 0
 if effis_gdf is not None and not effis_gdf.empty:
@@ -914,7 +974,7 @@ if show_enp:
         )
 
 # EFFIS burnt areas (dark red polygons — always shown)
-effis_geojson = build_effis_geojson()
+effis_geojson = build_effis_geojson(_effis_mtime)
 if effis_geojson is not None:
     layers.insert(
         0,
@@ -988,36 +1048,76 @@ with hist_col:
                 ],
             })
 
-            # Sum up area_ha by month and merge onto the full month sequence
-            monthly_sums = chart_df.groupby("Month_Num", as_index=False)[area_c].sum()
-            monthly = all_months.merge(monthly_sums, on="Month_Num", how="left")
-            monthly[area_c] = monthly[area_c].fillna(0.0)
+            # Sum up area_ha and fire count by month and merge onto the full month sequence
+            monthly_agg = (
+                chart_df.groupby("Month_Num", as_index=False)
+                .agg(
+                    Burnt_Ha=(area_c, "sum"),
+                    Fires=(area_c, "count"),
+                )
+            )
+            monthly = all_months.merge(monthly_agg, on="Month_Num", how="left")
+            monthly["Burnt_Ha"] = monthly["Burnt_Ha"].fillna(0.0)
+            monthly["Fires"] = monthly["Fires"].fillna(0).astype(int)
             monthly = monthly.sort_values("Month_Num")
 
-            # Format Y-axis for better readability
-            monthly["Area (x1000 ha)"] = monthly[area_c] / 1000.0
+            # Format Y-axis for better readability (in thousands of ha), with a minimum
+            # visible bar height (~2% of peak) whenever Burnt_Ha > 0 so months with smaller
+            # autumn/winter fires (e.g. Jan, Oct, Nov) remain clearly visible alongside July.
+            monthly["Area (x1000 ha)"] = monthly["Burnt_Ha"] / 1000.0
+            max_area_k = float(monthly["Area (x1000 ha)"].max()) or 1.0
+            min_visible_k = max_area_k * 0.02
+            monthly["Display_Area"] = np.where(
+                monthly["Burnt_Ha"] > 0,
+                np.maximum(monthly["Area (x1000 ha)"], min_visible_k),
+                0.0,
+            )
+            monthly["Label"] = [
+                f"{ha / 1000:.1f}k" if ha >= 1000 else (f"{ha:,.0f} ha" if ha > 0 else "")
+                for ha in monthly["Burnt_Ha"]
+            ]
+
+            base_chart = alt.Chart(monthly).encode(
+                x=alt.X(
+                    "Month:N",
+                    title=None,
+                    sort=monthly["Month"].tolist(),
+                    axis=alt.Axis(
+                        labelFontSize=12,
+                        titleFontSize=13,
+                        labelAngle=-45,
+                        labelLimit=80,
+                    ),
+                ),
+                tooltip=[
+                    alt.Tooltip("Month:N", title="Month"),
+                    alt.Tooltip("Burnt_Ha:Q", title="Burnt Area (ha)", format=",.0f"),
+                    alt.Tooltip("Fires:Q", title="EFFIS Fires", format=",d"),
+                ],
+            )
+
+            bars = base_chart.mark_bar(color="#B22222").encode(
+                y=alt.Y(
+                    "Display_Area:Q",
+                    title="Area (x1000 ha)",
+                    scale=alt.Scale(domain=[0, max_area_k * 1.12]),
+                    axis=alt.Axis(labelFontSize=12, titleFontSize=13),
+                ),
+            )
+
+            labels = base_chart.mark_text(
+                align="center",
+                baseline="bottom",
+                dy=-4,
+                fontSize=10,
+                color="#495057",
+            ).encode(
+                y=alt.Y("Display_Area:Q"),
+                text=alt.Text("Label:N"),
+            )
 
             bar_chart_obj = (
-                alt.Chart(monthly)
-                .mark_bar(color="#B22222")
-                .encode(
-                    x=alt.X(
-                        "Month:N",
-                        title=None,
-                        sort=monthly["Month"].tolist(),
-                        axis=alt.Axis(
-                            labelFontSize=12,
-                            titleFontSize=13,
-                            labelAngle=-45,
-                            labelLimit=80,
-                        ),
-                    ),
-                    y=alt.Y(
-                        "Area (x1000 ha):Q",
-                        title="Area (x1000 ha)",
-                        axis=alt.Axis(labelFontSize=12, titleFontSize=13),
-                    ),
-                )
+                (bars + labels)
                 .properties(
                     height=400,
                     padding={"top": 20, "left": 15, "right": 15, "bottom": 30},
