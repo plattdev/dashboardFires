@@ -21,6 +21,7 @@ import datetime                        # date arithmetic for date picker & FIRMS
 import hashlib                         # MD5 hash of fire data for caching KPI results
 import io                              # in-memory bytes buffer for reading EFFIS zip
 import json                            # convert GeoPandas GeoJSON strings into dicts for PyDeck
+import time                            # check local EFFIS parquet cache age
 from pathlib import Path               # cross-platform file-system path handling
 
 # ── Third-party imports ───────────────────────────────────────────────────────
@@ -188,6 +189,7 @@ _VALID_CONFIDENCE = ("nominal", "high", "n", "h")
 _EFFIS_DATE_COLS = ("FIREDATE", "INITIALDATE", "INIT_DATE")
 _EFFIS_AREA_COLS = ("AREA_HA", "AREA", "area_ha")
 _EFFIS_COUNTRY_COLS = ("COUNTRY", "COUNTRY_CODE", "country")
+_EFFIS_CACHE_TTL_SECONDS = 86_400  # Refresh local parquet every 24 hours
 
 
 def _first_matching_col(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
@@ -318,11 +320,15 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
     gpd.GeoDataFrame in EPSG:4326 with burnt-area polygons, or None on error.
     """
     cache_path = DATA_DIR / "effis_burnt_areas_2026.parquet"
+    cached_gdf: gpd.GeoDataFrame | None = None
     if cache_path.exists():
         try:
-            return gpd.read_parquet(cache_path)
+            cached_gdf = gpd.read_parquet(cache_path)
+            cache_age = time.time() - cache_path.stat().st_mtime
+            if cache_age < _EFFIS_CACHE_TTL_SECONDS:
+                return cached_gdf
         except Exception:
-            pass
+            cached_gdf = None
 
     url = (
         "https://maps.effis.emergency.copernicus.eu/effis"
@@ -341,10 +347,10 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
         gdf = gpd.read_file(io.BytesIO(resp.content))
     except Exception as exc:
         print(f"Error fetching EFFIS data: {exc}")
-        return None
+        return cached_gdf
 
     if gdf.empty:
-        return None
+        return cached_gdf
 
     # Filter for Spain
     country_col = _first_matching_col(gdf, _EFFIS_COUNTRY_COLS)
@@ -358,7 +364,7 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
         gdf = gdf[gdf[date_col] >= "2026-01-01"]
 
     if gdf.empty:
-        return None
+        return cached_gdf
 
     # Reproject to WGS-84 for PyDeck
     if gdf.crs and gdf.crs.to_epsg() != 4326:
@@ -961,18 +967,32 @@ with hist_col:
         if date_c and area_c:
             chart_df = effis_gdf[[date_c, area_c]].copy()
             parsed_dates = pd.to_datetime(chart_df[date_c], errors="coerce")
-            chart_df["Month"] = parsed_dates.dt.month_name()
             chart_df["Month_Num"] = parsed_dates.dt.month
 
             # Ensure area is numeric before summing
             chart_df[area_c] = pd.to_numeric(chart_df[area_c], errors="coerce").fillna(0.0)
 
-            # Sum up area_ha by month
-            monthly = (
-                chart_df.groupby(["Month_Num", "Month"], as_index=False)[area_c]
-                .sum()
-                .sort_values("Month_Num")
+            # Build full sequence of months from January up to the current month of the year
+            today = datetime.date.today()
+            max_data_month = (
+                int(chart_df["Month_Num"].max())
+                if not chart_df["Month_Num"].isna().all()
+                else 1
             )
+            last_month = max(today.month, max_data_month) if today.year == 2026 else 12
+            all_months = pd.DataFrame({
+                "Month_Num": list(range(1, last_month + 1)),
+                "Month": [
+                    datetime.date(2026, m, 1).strftime("%B")
+                    for m in range(1, last_month + 1)
+                ],
+            })
+
+            # Sum up area_ha by month and merge onto the full month sequence
+            monthly_sums = chart_df.groupby("Month_Num", as_index=False)[area_c].sum()
+            monthly = all_months.merge(monthly_sums, on="Month_Num", how="left")
+            monthly[area_c] = monthly[area_c].fillna(0.0)
+            monthly = monthly.sort_values("Month_Num")
 
             # Format Y-axis for better readability
             monthly["Area (x1000 ha)"] = monthly[area_c] / 1000.0
