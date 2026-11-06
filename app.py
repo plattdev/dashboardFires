@@ -21,6 +21,7 @@ import datetime                        # date arithmetic for date picker & FIRMS
 import hashlib                         # MD5 hash of fire data for caching KPI results
 import io                              # in-memory bytes buffer for reading EFFIS zip
 import json                            # convert GeoPandas GeoJSON strings into dicts for PyDeck
+import logging                         # structured runtime diagnostics instead of bare print()
 import time                            # check local EFFIS parquet cache age
 from pathlib import Path               # cross-platform file-system path handling
 
@@ -35,6 +36,8 @@ import requests                        # HTTP client for downloading EFFIS burnt
 from rasterio.enums import Resampling  # resampling strategy when downscaling the raster
 from scipy.spatial import cKDTree      # fast spatial proximity queries for population KPIs
 import streamlit as st                 # the web-app framework that runs everything
+
+logger = logging.getLogger(__name__)
 
 
 # ── Page Configuration ────────────────────────────────────────────────────────
@@ -59,13 +62,8 @@ st.markdown("""
 footer { visibility: hidden; }
 
 /* ── Container padding ─────────────────────────────────────────────────────── */
-.main .block-container,
-[data-testid="stMainBlockContainer"],
-.stMainBlockContainer {
-    padding-top: 2rem !important;
-    padding-bottom: 0 !important;
-    padding-left: 2rem !important;
-    padding-right: 2rem !important;
+[data-testid="stMainBlockContainer"] {
+    padding: 2rem 2rem 0 2rem !important;
     max-width: 100% !important;
 }
 
@@ -113,8 +111,8 @@ span[data-baseweb="tag"] svg {
 
 /* ── Compact multiselect widget ────────────────────────────────────────────── */
 div[data-testid="stMultiSelect"] {
-    margin-top: 0px !important;
-    margin-bottom: 0px !important;
+    margin-top: 0 !important;
+    margin-bottom: 0 !important;
 }
 div[data-testid="stMultiSelect"] label {
     display: none !important;
@@ -139,11 +137,10 @@ span[data-baseweb="tag"] {
     border: 1px solid rgba(0, 0, 0, 0.05) !important;
 }
 
-/* ── Reusable spacer class ─────────────────────────────────────────────────── */
+/* ── Reusable utility classes ──────────────────────────────────────────────── */
 .spacer-sm { margin-top: 5px; }
 .spacer-md { margin-top: 15px; }
 
-/* ── Subtle UX status note under calendar ──────────────────────────────────── */
 .status-note {
     background-color: #F0F2F6;
     border-left: 3px solid #6c757d;
@@ -154,6 +151,36 @@ span[data-baseweb="tag"] {
     font-size: 0.8rem;
     color: #495057;
     line-height: 1.4;
+}
+
+.legend-bar {
+    margin: 0;
+    font-size: 0.85em;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+.legend-swatch {
+    display: inline-block;
+    width: 14px;
+    height: 12px;
+    background-color: #B22222;
+    vertical-align: middle;
+    margin-right: 3px;
+    border-radius: 1px;
+}
+
+.data-sources {
+    margin-top: 15px;
+    margin-bottom: 0;
+    font-size: 0.75em;
+    color: gray;
+    line-height: 1.4;
+}
+.data-sources a {
+    color: gray;
+    text-decoration: none;
 }
 
 /* ── PyDeck map iframe responsive height ───────────────────────────────────── */
@@ -173,6 +200,8 @@ span[data-baseweb="tag"] {
 # ── Constants ─────────────────────────────────────────────────────────────────
 DATA_DIR = Path("data")
 POPULATION_TIFF = DATA_DIR / "SpainPopulation2026_CN_100m_R2025A_v1.tif"
+EFFIS_PARQUET = DATA_DIR / "effis_burnt_areas_2026.parquet"
+_CURRENT_YEAR = datetime.date.today().year
 
 # Downsample the 100 m raster to ~1 km for the heatmap layer (10× = 1000 m).
 _POP_DOWNSAMPLE_FACTOR = 10
@@ -201,13 +230,13 @@ def _first_matching_col(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | 
 #  CACHED DATA LOADERS
 #  --------------------------------------------------------------------------
 #  Streamlit re-runs the entire script on every user interaction.
-#  @st.cache_resource keeps heavy objects (GeoDataFrames, file handles) in
+#  @st.cache_resource keeps heavy objects (GeoDataFrames, spatial trees) in
 #  memory across reruns.  @st.cache_data caches serialisable return values
 #  (dicts, DataFrames) and is invalidated when inputs change.
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-@st.cache_resource()
+@st.cache_resource(show_spinner=False)
 def load_enp_geodataframes() -> dict[str, gpd.GeoDataFrame]:
     """Load ENP (Espacios Naturales Protegidos) GeoParquet files from disk.
 
@@ -223,7 +252,7 @@ def load_enp_geodataframes() -> dict[str, gpd.GeoDataFrame]:
     }
 
 
-@st.cache_data()
+@st.cache_data(show_spinner=False)
 def build_enp_geojson() -> dict | None:
     """Build a GeoJSON dict of all ENP areas in WGS-84 for PyDeck rendering.
 
@@ -252,11 +281,14 @@ def build_enp_geojson() -> dict | None:
             + " — "
             + combined["SITE_NAME"].fillna("")
         )
+        combined = combined[["geometry", "tooltip_text"]]
+    else:
+        combined = combined[["geometry"]]
 
     return json.loads(combined.to_json())
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_data(show_spinner=False)
 def load_population_heatmap_data() -> pd.DataFrame | None:
     """Load the WorldPop raster, downsample to ~1 km, return a DataFrame.
 
@@ -294,19 +326,6 @@ def load_population_heatmap_data() -> pd.DataFrame | None:
     })
 
 
-@st.cache_resource(show_spinner=False)
-def _open_population_raster() -> rasterio.DatasetReader | None:
-    """Keep the population raster file handle open for point-sampling.
-
-    Cached with @st.cache_resource so the handle is shared across reruns
-    instead of opening/closing the 93 MB file every time.
-    Returns None if the TIFF file is missing.
-    """
-    if not POPULATION_TIFF.exists():
-        return None
-    return rasterio.open(POPULATION_TIFF)
-
-
 def _refresh_effis_parquet(cache_path: Path) -> None:
     """Download the latest EFFIS current-season burnt-area shapefile and save to parquet."""
     url = (
@@ -315,7 +334,10 @@ def _refresh_effis_parquet(cache_path: Path) -> None:
         "&version=1.1.0&outputformat=SHAPEZIP"
     )
     headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        "User-Agent": (
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
     }
 
     try:
@@ -323,7 +345,7 @@ def _refresh_effis_parquet(cache_path: Path) -> None:
         resp.raise_for_status()
         gdf = gpd.read_file(io.BytesIO(resp.content))
     except Exception as exc:
-        print(f"Error fetching EFFIS data: {exc}")
+        logger.warning("Could not refresh EFFIS data from WFS: %s", exc)
         return
 
     if gdf.empty:
@@ -338,7 +360,7 @@ def _refresh_effis_parquet(cache_path: Path) -> None:
     date_col = _first_matching_col(gdf, _EFFIS_DATE_COLS)
     if date_col is not None:
         gdf[date_col] = pd.to_datetime(gdf[date_col], errors="coerce")
-        gdf = gdf[gdf[date_col] >= "2026-01-01"]
+        gdf = gdf[gdf[date_col] >= f"{_CURRENT_YEAR}-01-01"]
 
     if gdf.empty:
         return
@@ -350,7 +372,7 @@ def _refresh_effis_parquet(cache_path: Path) -> None:
     # Simplify for rendering performance (100 m tolerance in degrees ≈ 0.001°)
     gdf["geometry"] = gdf["geometry"].simplify(0.001)
 
-    # Build tooltip
+    # Build tooltip and normalize essential columns
     area_col = _first_matching_col(gdf, _EFFIS_AREA_COLS)
     if area_col and date_col:
         gdf["tooltip_text"] = (
@@ -361,18 +383,15 @@ def _refresh_effis_parquet(cache_path: Path) -> None:
             + " ha"
         )
     else:
-        gdf["tooltip_text"] = "2026 Burnt Area"
+        gdf["tooltip_text"] = f"{_CURRENT_YEAR} Burnt Area"
 
-    # Cache to local parquet
     try:
         if date_col is not None:
             gdf[date_col] = gdf[date_col].astype(str)
-        for col in gdf.columns:
-            if col not in ["geometry", "tooltip_text", area_col, country_col]:
-                gdf[col] = gdf[col].astype(str)
-        gdf.to_parquet(cache_path)
+        keep_cols = [c for c in (date_col, area_col, "tooltip_text", "geometry") if c and c in gdf.columns]
+        gdf[keep_cols].to_parquet(cache_path)
     except Exception as exc:
-        print(f"Warning: could not cache EFFIS data to parquet: {exc}")
+        logger.warning("Could not cache EFFIS data to parquet: %s", exc)
 
 
 def _get_effis_cache_mtime() -> float:
@@ -381,14 +400,13 @@ def _get_effis_cache_mtime() -> float:
     Passing this mtime into @st.cache_data functions guarantees that Streamlit
     invalidates its in-memory cache immediately whenever the parquet updates.
     """
-    cache_path = DATA_DIR / "effis_burnt_areas_2026.parquet"
     needs_refresh = (
-        not cache_path.exists()
-        or (time.time() - cache_path.stat().st_mtime) >= _EFFIS_CACHE_TTL_SECONDS
+        not EFFIS_PARQUET.exists()
+        or (time.time() - EFFIS_PARQUET.stat().st_mtime) >= _EFFIS_CACHE_TTL_SECONDS
     )
     if needs_refresh:
-        _refresh_effis_parquet(cache_path)
-    return round(cache_path.stat().st_mtime, 2) if cache_path.exists() else 0.0
+        _refresh_effis_parquet(EFFIS_PARQUET)
+    return round(EFFIS_PARQUET.stat().st_mtime, 2) if EFFIS_PARQUET.exists() else 0.0
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
@@ -398,24 +416,24 @@ def fetch_effis_burnt_areas(cache_mtime: float = 0.0) -> gpd.GeoDataFrame | None
     Keyed on cache_mtime so any update to the local parquet file immediately
     refreshes the histogram, KPIs, and map layers.
     """
-    cache_path = DATA_DIR / "effis_burnt_areas_2026.parquet"
-    if not cache_path.exists():
-        _refresh_effis_parquet(cache_path)
-    if cache_path.exists():
+    if not EFFIS_PARQUET.exists():
+        _refresh_effis_parquet(EFFIS_PARQUET)
+    if EFFIS_PARQUET.exists():
         try:
-            return gpd.read_parquet(cache_path)
+            return gpd.read_parquet(EFFIS_PARQUET)
         except Exception as exc:
-            print(f"Error reading EFFIS parquet cache: {exc}")
+            logger.warning("Error reading EFFIS parquet cache: %s", exc)
     return None
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
 def build_effis_geojson(cache_mtime: float = 0.0) -> dict | None:
-    """Serialize the EFFIS burnt-area GeoDataFrame to a cached GeoJSON dict."""
+    """Serialize the EFFIS burnt-area GeoDataFrame to a lean cached GeoJSON dict."""
     effis_gdf = fetch_effis_burnt_areas(cache_mtime)
     if effis_gdf is None or effis_gdf.empty:
         return None
-    return json.loads(effis_gdf.to_json())
+    cols = [c for c in ("geometry", "tooltip_text") if c in effis_gdf.columns]
+    return json.loads(effis_gdf[cols].to_json())
 
 
 def get_effis_last_fire_date(effis_gdf: gpd.GeoDataFrame | None) -> datetime.date | None:
@@ -519,35 +537,21 @@ def find_last_fire_date(
 ) -> datetime.date:
     """Determine the most recent date with recorded fire activity in Spain.
 
-    Checks both NASA FIRMS recent detections and the EFFIS 2026 dataset,
+    Checks both NASA FIRMS recent detections and the EFFIS dataset,
     returning whichever has the most recent Spanish wildfire date (<= yesterday).
     """
     candidates: list[datetime.date] = []
 
-    # 1. Latest Spanish wildfire recorded in EFFIS (2026 season)
     effis_last = get_effis_last_fire_date(fetch_effis_burnt_areas(effis_mtime))
     if effis_last is not None:
         candidates.append(min(effis_last, yesterday))
 
-    # 2. Check the latest 5-day window ending on yesterday in NASA FIRMS
     recent_start = (yesterday - datetime.timedelta(days=_FIRMS_MAX_DAYS - 1)).strftime("%Y-%m-%d")
-    recent_df = fetch_europe_fires(api_key, recent_start, _FIRMS_MAX_DAYS, "VIIRS_SNPP_NRT")
-    if not recent_df.empty:
-        spain_recent = filter_spain(recent_df)
-        if not spain_recent.empty:
-            candidates.append(min(pd.to_datetime(spain_recent["acq_date"]).max().date(), yesterday))
-
-    # 3. Query FIRMS dateless endpoint for the latest 5 days available on server
-    if not candidates:
-        latest_url = (
-            f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
-            f"{api_key}/VIIRS_SNPP_NRT/{_FIRMS_BBOX}/{_FIRMS_MAX_DAYS}"
-        )
-        latest_df = _read_firms_csv(latest_url)
-        if not latest_df.empty:
-            spain_latest = filter_spain(latest_df)
-            if not spain_latest.empty:
-                candidates.append(min(pd.to_datetime(spain_latest["acq_date"]).max().date(), yesterday))
+    spain_recent = filter_spain(
+        fetch_europe_fires(api_key, recent_start, _FIRMS_MAX_DAYS, "VIIRS_SNPP_NRT")
+    )
+    if not spain_recent.empty:
+        candidates.append(min(pd.to_datetime(spain_recent["acq_date"]).max().date(), yesterday))
 
     return max(candidates) if candidates else yesterday
 
@@ -563,7 +567,7 @@ def _hash_fire_df(fires_df: pd.DataFrame) -> str:
     Hashes only the coordinate columns so the KPI cache is invalidated when
     fire locations change but not when unrelated columns differ.
     """
-    raw = pd.util.hash_pandas_object(fires_df[["latitude", "longitude"]]).values.tobytes()
+    raw = pd.util.hash_pandas_object(fires_df[["latitude", "longitude"]]).to_numpy().tobytes()
     return hashlib.md5(raw).hexdigest()
 
 
@@ -589,9 +593,7 @@ def compute_eco_fires(fire_hash: str, _fires_df: pd.DataFrame) -> int:
     if not enp_gdfs or _fires_df.empty:
         return 0
 
-    # Vectorised geometry creation — no Python loop needed
     fires_gdf = gpd.GeoDataFrame(
-        _fires_df,
         geometry=gpd.points_from_xy(_fires_df["longitude"], _fires_df["latitude"]),
         crs="EPSG:4326",
     )
@@ -599,8 +601,8 @@ def compute_eco_fires(fire_hash: str, _fires_df: pd.DataFrame) -> int:
     hit_indices: set[int] = set()
     for enp_gdf in enp_gdfs.values():
         fires_projected = fires_gdf.to_crs(enp_gdf.crs)
-        joined = gpd.sjoin(fires_projected, enp_gdf, predicate="intersects")
-        hit_indices.update(joined.index.tolist())
+        joined = gpd.sjoin(fires_projected, enp_gdf[["geometry"]], predicate="intersects")
+        hit_indices.update(joined.index)
 
     return len(hit_indices)
 
@@ -625,36 +627,36 @@ def compute_population_kpis(fire_hash: str, _fires_df: pd.DataFrame) -> dict[str
         mean_density – average population value at fire-pixel locations.
     """
     result: dict[str, float | int] = {"exposed_pop": 0, "mean_density": 0.0}
+    if _fires_df.empty:
+        return result
 
     # ── 1. Exposed population (vectorised with cKDTree) ───────────────────
     pop_df = load_population_heatmap_data()
-    if pop_df is not None and not pop_df.empty and not _fires_df.empty:
-        # Build a KD-tree of population cell coordinates
-        pop_coords = np.column_stack([pop_df["lat"].values, pop_df["lon"].values])
+    if pop_df is not None and not pop_df.empty:
+        pop_coords = np.column_stack([pop_df["lat"].to_numpy(), pop_df["lon"].to_numpy()])
         tree = cKDTree(pop_coords)
 
-        # Query all population cells within the degree buffer of any fire
-        fire_coords = np.column_stack([_fires_df["latitude"].values, _fires_df["longitude"].values])
+        fire_coords = np.column_stack([
+            _fires_df["latitude"].to_numpy(),
+            _fires_df["longitude"].to_numpy(),
+        ])
         nearby_sets = tree.query_ball_point(fire_coords, r=_DEG_BUFFER_5KM)
-
-        # Flatten to unique population-cell indices and sum their population
-        nearby_indices = set()
-        for idx_list in nearby_sets:
-            nearby_indices.update(idx_list)
+        nearby_indices = set().union(*nearby_sets)
 
         if nearby_indices:
-            result["exposed_pop"] = int(pop_df["population"].values[list(nearby_indices)].sum())
+            pop_vals = pop_df["population"].to_numpy()
+            result["exposed_pop"] = int(pop_vals[list(nearby_indices)].sum())
 
     # ── 2. Mean density at fire locations (point-samples the full raster) ─
-    src = _open_population_raster()
-    if src is not None and not _fires_df.empty:
+    if POPULATION_TIFF.exists():
         try:
-            coords = list(zip(_fires_df["longitude"], _fires_df["latitude"]))
-            sampled = np.array([val[0] for val in src.sample(coords)], dtype=np.float32)
-            if src.nodata is not None:
-                sampled[sampled == src.nodata] = 0.0
-            sampled[sampled < 0] = 0.0
-            result["mean_density"] = float(np.mean(sampled)) if len(sampled) else 0.0
+            with rasterio.open(POPULATION_TIFF) as src:
+                coords = list(zip(_fires_df["longitude"], _fires_df["latitude"]))
+                sampled = np.array([val[0] for val in src.sample(coords)], dtype=np.float32)
+                if src.nodata is not None:
+                    sampled[sampled == src.nodata] = 0.0
+                sampled[sampled < 0] = 0.0
+                result["mean_density"] = float(np.mean(sampled)) if len(sampled) else 0.0
         except Exception:
             pass  # leave mean_density at 0.0
 
@@ -904,11 +906,23 @@ with map_col:
         _kpi_card("Total Active Fires (High Confidence)", total_fires)
         _kpi_card("Fires in Protected Areas", eco_fires)
     with k2:
-        _kpi_card("People within 5 km of Fires", f"{pop_kpis['exposed_pop']:,}" if pop_kpis["exposed_pop"] else "—")
-        _kpi_card("Avg. Population at Fire Sites", f"{pop_kpis['mean_density']:.1f} people / ha" if pop_kpis["mean_density"] else "—")
+        _kpi_card(
+            "People within 5 km of Fires",
+            f"{pop_kpis['exposed_pop']:,}" if total_fires > 0 else "—",
+        )
+        _kpi_card(
+            "Avg. Population at Fire Sites",
+            f"{pop_kpis['mean_density']:.1f} people / ha" if total_fires > 0 else "—",
+        )
     with k3:
-        _kpi_card("Total Burnt Area 2026 (EFFIS)", f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—")
-        _kpi_card("Total EFFIS Fires (2026)", effis_count if effis_count else "—")
+        _kpi_card(
+            f"Total Burnt Area {_CURRENT_YEAR} (EFFIS)",
+            f"{effis_total_ha:,.0f} ha" if effis_total_ha else "—",
+        )
+        _kpi_card(
+            f"Total EFFIS Fires ({_CURRENT_YEAR})",
+            effis_count if effis_count else "—",
+        )
 
     st.markdown("<div class='spacer-md'></div>", unsafe_allow_html=True)
 
@@ -916,13 +930,13 @@ with map_col:
     t_leg, t_layers = st.columns([2.1, 1.0], vertical_alignment="center")
     with t_leg:
         st.markdown(
-            "<div style='margin: 0px; font-size: 0.85em; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;'>"
+            "<div class='legend-bar'>"
             "<b>Legend:</b> "
             '<span style="color:#FF4B4B; font-size: 1.1em; vertical-align: middle;">⬤</span> ≤ 24 h &nbsp;|&nbsp; '
             '<span style="color:#FD7F80; font-size: 1.1em; vertical-align: middle;">⬤</span> 24–48 h &nbsp;|&nbsp; '
             '<span style="color:#FBB3B4; font-size: 1.1em; vertical-align: middle;">⬤</span> 2–4 days &nbsp;|&nbsp; '
             '<span style="color:#F9DFE0; font-size: 1.1em; vertical-align: middle;">⬤</span> > 4 days &nbsp;|&nbsp; '
-            '<span style="display: inline-block; width: 14px; height: 12px; background-color: #B22222; vertical-align: middle; margin-right: 3px; border-radius: 1px;"></span> Burnt Area 2026'
+            f'<span class="legend-swatch"></span> Burnt Area {_CURRENT_YEAR}'
             "</div>",
             unsafe_allow_html=True,
         )
@@ -1020,7 +1034,7 @@ if show_pop:
 # ── Bar chart (left column) ──────────────────────────────────────────────────
 with hist_col:
     if effis_gdf is not None and not effis_gdf.empty:
-        st.markdown("#### Monthly Burnt Area (2026)")
+        st.markdown(f"#### Monthly Burnt Area ({_CURRENT_YEAR})")
         date_c = _first_matching_col(effis_gdf, _EFFIS_DATE_COLS)
         area_c = _first_matching_col(effis_gdf, _EFFIS_AREA_COLS)
 
@@ -1039,11 +1053,11 @@ with hist_col:
                 if not chart_df["Month_Num"].isna().all()
                 else 1
             )
-            last_month = max(today.month, max_data_month) if today.year == 2026 else 12
+            last_month = max(today.month, max_data_month) if today.year == _CURRENT_YEAR else 12
             all_months = pd.DataFrame({
                 "Month_Num": list(range(1, last_month + 1)),
                 "Month": [
-                    datetime.date(2026, m, 1).strftime("%B")
+                    datetime.date(_CURRENT_YEAR, m, 1).strftime("%B")
                     for m in range(1, last_month + 1)
                 ],
             })
@@ -1133,12 +1147,13 @@ with hist_col:
 
     # Data sources below the bar chart
     st.markdown(
-        "<div style='margin-top: 15px; margin-bottom: 0px; font-size: 0.75em; color: gray; line-height: 1.4;'>"
-        "<b>Data sources:</b> NASA FIRMS (VIIRS active fires filtered for nominal/high confidence) | MITECO (Protected Natural Areas) | "
-        "<a href='https://www.worldpop.org/' style='color: gray; text-decoration: none;'>WorldPop</a> Population Data "
-        "(<a href='https://creativecommons.org/licenses/by/4.0/' style='color: gray; text-decoration: none;'>CC BY 4.0</a> / "
-        "<a href='https://opendatacommons.org/licenses/odbl/' style='color: gray; text-decoration: none;'>ODbL</a>) | "
-        "<a href='https://effis.jrc.ec.europa.eu/' style='color: gray; text-decoration: none;'>EFFIS 2026 (Copernicus EMS)</a> Burnt Areas."
+        "<div class='data-sources'>"
+        "<b>Data sources:</b> NASA FIRMS (VIIRS active fires filtered for nominal/high confidence) | "
+        "MITECO (Protected Natural Areas) | "
+        "<a href='https://www.worldpop.org/'>WorldPop</a> Population Data "
+        "(<a href='https://creativecommons.org/licenses/by/4.0/'>CC BY 4.0</a> / "
+        "<a href='https://opendatacommons.org/licenses/odbl/'>ODbL</a>) | "
+        f"<a href='https://effis.jrc.ec.europa.eu/'>EFFIS {_CURRENT_YEAR} (Copernicus EMS)</a> Burnt Areas."
         "</div>",
         unsafe_allow_html=True,
     )
