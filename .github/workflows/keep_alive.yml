@@ -2,18 +2,64 @@ name: Keep Streamlit App Awake
 
 on:
   schedule:
-    # Runs every 3 days at 08:00 UTC
-    - cron: '0 8 */3 * *'
+    # Runs every 12 hours to prevent Streamlit Community Cloud hibernation
+    - cron: '0 */12 * * *'
   workflow_dispatch: # Allows manual trigger from GitHub UI if needed
 
 jobs:
-  ping:
+  wake-up:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - name: Ping Streamlit App
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright Chromium
         run: |
-          # Replace with your actual Streamlit Cloud app URL
-          URL="https://dashboardfires.streamlit.app"
-          echo "Pinging $URL to prevent hibernation..."
-          curl -c cookies.txt -b cookies.txt -sL -o /dev/null -w "%{http_code}\n" "$URL"
+          pip install --quiet playwright
+          playwright install --with-deps chromium
+
+      - name: Visit Streamlit App and Wake if Hibernating
+        env:
+          APP_URL: "https://dashboardfires.streamlit.app"
+        run: |
+          python - <<'EOF'
+          import os
+          from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+
+          url = os.environ["APP_URL"]
+          with sync_playwright() as p:
+              browser = p.chromium.launch(headless=True)
+              context = browser.new_context(
+                  user_agent=(
+                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                  )
+              )
+              page = context.new_page()
+              print(f"Navigating to {url}...")
+              page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+
+              # Click the Streamlit Cloud wake-up button if the app is hibernating
+              wake_btn = page.locator(
+                  'button:has-text("Yes, get this app back up"), '
+                  '[data-testid="wakeup-button-viewer"]'
+              )
+              try:
+                  if wake_btn.first.is_visible(timeout=10_000):
+                      print("App is hibernating — clicking wake-up button...")
+                      wake_btn.first.click()
+              except PlaywrightTimeoutError:
+                  pass
+
+              # Wait for the Streamlit app container & WebSocket stream to connect
+              page.locator('[data-testid="stAppViewContainer"]').wait_for(
+                  state="visible", timeout=90_000
+              )
+              page.wait_for_timeout(5_000)
+              print("Streamlit app is awake and rendered successfully.")
+              browser.close()
+          EOF
 

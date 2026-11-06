@@ -21,7 +21,6 @@ import datetime                        # date arithmetic for date picker & FIRMS
 import hashlib                         # MD5 hash of fire data for caching KPI results
 import io                              # in-memory bytes buffer for reading EFFIS zip
 import json                            # convert GeoPandas GeoJSON strings into dicts for PyDeck
-from concurrent.futures import ThreadPoolExecutor  # background prefetch of heavy datasets
 from pathlib import Path               # cross-platform file-system path handling
 
 # ── Third-party imports ───────────────────────────────────────────────────────
@@ -142,6 +141,30 @@ span[data-baseweb="tag"] {
 /* ── Reusable spacer class ─────────────────────────────────────────────────── */
 .spacer-sm { margin-top: 5px; }
 .spacer-md { margin-top: 15px; }
+
+/* ── Subtle UX status note under calendar ──────────────────────────────────── */
+.status-note {
+    background-color: #F0F2F6;
+    border-left: 3px solid #6c757d;
+    border-radius: 6px;
+    padding: 6px 12px;
+    margin-top: 6px;
+    margin-bottom: 4px;
+    font-size: 0.8rem;
+    color: #495057;
+    line-height: 1.4;
+}
+
+/* ── PyDeck map iframe responsive height ───────────────────────────────────── */
+[data-testid="stDeckGlJsonChart"] iframe {
+    min-height: 480px;
+}
+@media (max-width: 768px) {
+    [data-testid="stDeckGlJsonChart"] iframe {
+        min-height: 75vh !important;
+        height: 75vh !important;
+    }
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -155,6 +178,21 @@ _POP_DOWNSAMPLE_FACTOR = 10
 
 # Approximate degree buffer for ~5 km at Spain's latitude (~40°N).
 _DEG_BUFFER_5KM = 0.045
+
+# NASA FIRMS Area API limits and bounding box (Europe + Mediterranean + North Africa)
+_FIRMS_MAX_DAYS = 5
+_FIRMS_BBOX = "-20.0,25.0,35.0,65.0"
+_VALID_CONFIDENCE = ("nominal", "high", "n", "h")
+
+# Candidate column names in EFFIS shapefiles
+_EFFIS_DATE_COLS = ("FIREDATE", "INITIALDATE", "INIT_DATE")
+_EFFIS_AREA_COLS = ("AREA_HA", "AREA", "area_ha")
+_EFFIS_COUNTRY_COLS = ("COUNTRY", "COUNTRY_CODE", "country")
+
+
+def _first_matching_col(df: pd.DataFrame, candidates: tuple[str, ...]) -> str | None:
+    """Return the first column name from candidates present in df, or None."""
+    return next((col for col in candidates if col in df.columns), None)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -309,22 +347,12 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
         return None
 
     # Filter for Spain
-    country_col = None
-    for candidate in ["COUNTRY", "COUNTRY_CODE", "country"]:
-        if candidate in gdf.columns:
-            country_col = candidate
-            break
-
+    country_col = _first_matching_col(gdf, _EFFIS_COUNTRY_COLS)
     if country_col:
         gdf = gdf[gdf[country_col].astype(str).str.upper().isin(["ES", "SPAIN"])]
 
     # Filter by date — EFFIS uses INITIALDATE or FIREDATE
-    date_col = None
-    for candidate in ["INITIALDATE", "FIREDATE", "INIT_DATE"]:
-        if candidate in gdf.columns:
-            date_col = candidate
-            break
-
+    date_col = _first_matching_col(gdf, _EFFIS_DATE_COLS)
     if date_col is not None:
         gdf[date_col] = pd.to_datetime(gdf[date_col], errors="coerce")
         gdf = gdf[gdf[date_col] >= "2026-01-01"]
@@ -340,12 +368,7 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
     gdf["geometry"] = gdf["geometry"].simplify(0.001)
 
     # Build tooltip
-    area_col = None
-    for candidate in ["AREA_HA", "AREA", "area_ha"]:
-        if candidate in gdf.columns:
-            area_col = candidate
-            break
-
+    area_col = _first_matching_col(gdf, _EFFIS_AREA_COLS)
     if area_col and date_col:
         gdf["tooltip_text"] = (
             "Burnt Area — "
@@ -372,20 +395,43 @@ def fetch_effis_burnt_areas() -> gpd.GeoDataFrame | None:
     return gdf
 
 
-# ── Background Prefetch ───────────────────────────────────────────────────────
-# Kick off data loading in background threads *now*, while Streamlit renders
-# the title and controls.  By the time the map needs this data, the cached
-# loaders will already have completed and the results sit in the cache.
-_prefetch_pool = ThreadPoolExecutor(max_workers=4)
-_prefetch_pool.submit(load_enp_geodataframes)
-_prefetch_pool.submit(build_enp_geojson)
-_prefetch_pool.submit(load_population_heatmap_data)
-_prefetch_pool.submit(fetch_effis_burnt_areas)
+@st.cache_data(ttl=86400, show_spinner=False)
+def build_effis_geojson() -> dict | None:
+    """Serialize the EFFIS burnt-area GeoDataFrame to a cached GeoJSON dict."""
+    effis_gdf = fetch_effis_burnt_areas()
+    if effis_gdf is None or effis_gdf.empty:
+        return None
+    return json.loads(effis_gdf.to_json())
+
+
+def get_effis_last_fire_date(effis_gdf: gpd.GeoDataFrame | None) -> datetime.date | None:
+    """Return the latest wildfire date recorded in the EFFIS Spain dataset."""
+    if effis_gdf is None or effis_gdf.empty:
+        return None
+    date_col = _first_matching_col(effis_gdf, _EFFIS_DATE_COLS)
+    if not date_col:
+        return None
+    max_ts = pd.to_datetime(effis_gdf[date_col], errors="coerce").max()
+    return None if pd.isna(max_ts) else max_ts.date()
 
 
 # ── FIRMS API Loader ──────────────────────────────────────────────────────────
 
-@st.cache_data(ttl=3600)
+def _read_firms_csv(url: str) -> pd.DataFrame:
+    """Download and filter a NASA FIRMS CSV feed to nominal/high confidence."""
+    try:
+        data = pd.read_csv(url)
+    except Exception:
+        return pd.DataFrame()
+
+    if data.empty or "confidence" not in data.columns:
+        return pd.DataFrame()
+
+    # FIRMS uses 'n'/'h' for NRT feeds, 'nominal'/'high' for SP feeds
+    return data[data["confidence"].isin(_VALID_CONFIDENCE)].copy()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_europe_fires(api_key: str, start_date: str, day_range: int, source: str) -> pd.DataFrame:
     """Fetch VIIRS fire detections for Europe from the NASA FIRMS Area API.
 
@@ -402,22 +448,58 @@ def fetch_europe_fires(api_key: str, start_date: str, day_range: int, source: st
     pd.DataFrame filtered to nominal/high confidence detections only.
     Empty DataFrame on error or no data.
     """
-    bbox = "-20.0,25.0,35.0,65.0"  # Europe + Mediterranean + North Africa
-    url = (
+    clamped_range = max(1, min(day_range, _FIRMS_MAX_DAYS))
+    base_url = f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/{api_key}"
+
+    # Try primary source first; fall back to alternate feed if inside NRT/SP transition window
+    fallback_source = "VIIRS_SNPP_NRT" if source == "VIIRS_SNPP_SP" else "VIIRS_SNPP_SP"
+    for candidate_source in (source, fallback_source):
+        url = f"{base_url}/{candidate_source}/{_FIRMS_BBOX}/{clamped_range}/{start_date}"
+        df = _read_firms_csv(url)
+        if not df.empty:
+            return df
+
+    return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def find_last_fire_date(api_key: str, yesterday: datetime.date) -> datetime.date:
+    """Determine the most recent date with recorded fire activity in Spain.
+
+    Checks NASA FIRMS recent detections first, then falls back to the latest
+    recorded wildfire date in the EFFIS 2026 dataset so the calendar always
+    defaults to an informative 'To' date even during winter.
+    """
+    # 1. Check the latest 5-day window ending on yesterday
+    recent_start = (yesterday - datetime.timedelta(days=_FIRMS_MAX_DAYS - 1)).strftime("%Y-%m-%d")
+    recent_df = fetch_europe_fires(api_key, recent_start, _FIRMS_MAX_DAYS, "VIIRS_SNPP_NRT")
+    if not recent_df.empty:
+        spain_recent = filter_spain(recent_df)
+        if not spain_recent.empty:
+            return min(pd.to_datetime(spain_recent["acq_date"]).max().date(), yesterday)
+
+    # 2. Query FIRMS dateless endpoint for the latest 5 days available on server
+    latest_url = (
         f"https://firms.modaps.eosdis.nasa.gov/api/area/csv/"
-        f"{api_key}/{source}/{bbox}/{day_range}/{start_date}"
+        f"{api_key}/VIIRS_SNPP_NRT/{_FIRMS_BBOX}/{_FIRMS_MAX_DAYS}"
     )
-    try:
-        data = pd.read_csv(url)
-    except Exception as exc:
-        st.error(f"Error connecting to NASA FIRMS API: {exc}")
-        return pd.DataFrame()
+    latest_df = _read_firms_csv(latest_url)
+    if not latest_df.empty:
+        spain_latest = filter_spain(latest_df)
+        if not spain_latest.empty:
+            return min(pd.to_datetime(spain_latest["acq_date"]).max().date(), yesterday)
 
-    if data.empty or "confidence" not in data.columns:
-        return pd.DataFrame()
+    # 3. Fall back to the latest Spanish wildfire recorded in EFFIS (2026 season)
+    effis_last = get_effis_last_fire_date(fetch_effis_burnt_areas())
+    if effis_last is not None:
+        return min(effis_last, yesterday)
 
-    # FIRMS uses 'n'/'h' for NRT feeds, 'nominal'/'high' for SP feeds
-    return data[data["confidence"].isin(["nominal", "high", "n", "h"])]
+    if not recent_df.empty:
+        return min(pd.to_datetime(recent_df["acq_date"]).max().date(), yesterday)
+    if not latest_df.empty:
+        return min(pd.to_datetime(latest_df["acq_date"]).max().date(), yesterday)
+
+    return yesterday
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -545,6 +627,9 @@ def assign_colors(df: pd.DataFrame) -> pd.DataFrame:
     Uses np.select for vectorised performance — no row-wise .apply() needed.
     Colors go from dark red (most recent) through red, orange, to yellow.
     """
+    if df.empty:
+        return df
+
     dt_max = df["acq_datetime"].max()
     diff = dt_max - df["acq_datetime"]
 
@@ -564,6 +649,9 @@ def filter_spain(df: pd.DataFrame) -> pd.DataFrame:
 
     Uses simple lat/lon bounding boxes — fast and sufficient for this use case.
     """
+    if df.empty:
+        return df
+
     mainland = (
         (df["latitude"] >= 36.0)  & (df["latitude"] <= 44.0)
         & (df["longitude"] >= -9.5) & (df["longitude"] <= 4.5)
@@ -593,6 +681,41 @@ def _kpi_card(label: str, value) -> None:
 
 st.markdown("#### Spanish Wildfire Tracker  ")
 
+# ── Date range state & defaults ───────────────────────────────────────────────
+# NASA FIRMS API allows a maximum window of 5 days per request.
+# NRT data has ~1-day latency, so "yesterday" is the latest available date.
+# When there are no active fires today (e.g. in winter), default the 'To' date
+# automatically to the date of the last recorded fire.
+_yesterday = datetime.date.today() - datetime.timedelta(days=1)
+_api_key = st.secrets["FIRMS_API_KEY"]
+_last_fire_date = find_last_fire_date(_api_key, _yesterday)
+_default_to = _last_fire_date
+_default_from = _default_to - datetime.timedelta(days=2)  # 3-day window
+
+if "from_date" not in st.session_state:
+    st.session_state["from_date"] = _default_from
+if "to_date" not in st.session_state:
+    st.session_state["to_date"] = _default_to
+
+
+def _on_from_date_change() -> None:
+    """Keep 'To' within the valid [from_date, from_date + 4 days] window."""
+    f_date: datetime.date = st.session_state["from_date"]
+    t_date: datetime.date = st.session_state["to_date"]
+    max_to = min(f_date + datetime.timedelta(days=_FIRMS_MAX_DAYS - 1), _yesterday)
+    if t_date < f_date or t_date > max_to:
+        st.session_state["to_date"] = min(f_date + datetime.timedelta(days=2), max_to)
+
+
+def _on_to_date_change() -> None:
+    """Keep 'From' within the valid [to_date - 4 days, to_date] window."""
+    f_date: datetime.date = st.session_state["from_date"]
+    t_date: datetime.date = st.session_state["to_date"]
+    min_from = t_date - datetime.timedelta(days=_FIRMS_MAX_DAYS - 1)
+    if f_date > t_date or f_date < min_from:
+        st.session_state["from_date"] = t_date - datetime.timedelta(days=2)
+
+
 # ── Layout Definition ─────────────────────────────────────────────────────────
 hist_col, map_col = st.columns([1, 1.4], gap="large")
 
@@ -607,82 +730,95 @@ with hist_col:
     st.markdown("<div class='spacer-sm'></div>", unsafe_allow_html=True)
 
     # ── Date range picker ────────────────────────────────────────────────────
-    # NASA FIRMS API allows a maximum window of 5 days per request.
-    # NRT data has ~1-day latency, so "yesterday" is the latest available date.
-    _max_range_days = 5
-    _yesterday = datetime.date.today() - datetime.timedelta(days=1)
-    _default_from = _yesterday - datetime.timedelta(days=2)  # 3-day window
-
     c1, c2 = st.columns(2)
     with c1:
         from_date = st.date_input(
             "From:",
-            value=_default_from,
+            key="from_date",
             max_value=_yesterday,
+            on_change=_on_from_date_change,
             help="Earliest detection date to show.",
         )
     with c2:
-        # Clamp the max selectable "To" date so the range never exceeds 5 days
-        _max_to = min(from_date + datetime.timedelta(days=_max_range_days - 1), _yesterday)
         to_date = st.date_input(
             "To:",
-            value=_max_to,
-            min_value=from_date,
-            max_value=_max_to,
-            help=f"Latest detection date (max {_max_range_days}-day window).",
+            key="to_date",
+            max_value=_yesterday,
+            on_change=_on_to_date_change,
+            help=f"Latest detection date (max {_FIRMS_MAX_DAYS}-day window; defaults to last recorded fire).",
         )
 
-    # Compute the day span and FIRMS source from the two dates
-    selected_range = (to_date - from_date).days + 1          # inclusive
+    # Ensure range stays clamped within [1, _FIRMS_MAX_DAYS]
+    if to_date < from_date:
+        to_date = from_date
+    selected_range = min((to_date - from_date).days + 1, _FIRMS_MAX_DAYS)
     days_from_today = (datetime.date.today() - from_date).days
     source = "VIIRS_SNPP_SP" if days_from_today > 30 else "VIIRS_SNPP_NRT"
-
-    start_date = from_date
-    start_date_str = start_date.strftime("%Y-%m-%d")
+    start_date_str = from_date.strftime("%Y-%m-%d")
 
 # ── Fetch fire data ───────────────────────────────────────────────────────────
 europe_df = fetch_europe_fires(
-    st.secrets["FIRMS_API_KEY"],
+    _api_key,
     start_date_str,
     selected_range,
     source,
 )
 
+# ── Prepare fire DataFrame & Spain-only subset for KPIs ──────────────────────
+if not europe_df.empty:
+    europe_df = europe_df.copy()
+    europe_df["acq_datetime"] = pd.to_datetime(
+        europe_df["acq_date"] + " " + europe_df["acq_time"].astype(str).str.zfill(4),
+        format="%Y-%m-%d %H%M",
+    )
+    # Plain-text tooltip shown on hover over fire dots
+    europe_df["tooltip_text"] = (
+        "Fire Detection — Date: "
+        + europe_df["acq_datetime"].dt.strftime("%Y-%m-%d %H:%M")
+    )
+    europe_df = assign_colors(europe_df)
+    spain_df = filter_spain(europe_df)
+else:
+    spain_df = pd.DataFrame(columns=["latitude", "longitude"])
 
-if europe_df.empty:
-    st.warning("No fire data available for the selected date range.")
-    st.stop()
-
-# ── Prepare fire DataFrame ────────────────────────────────────────────────────
-europe_df["acq_datetime"] = pd.to_datetime(
-    europe_df["acq_date"] + " " + europe_df["acq_time"].astype(str).str.zfill(4),
-    format="%Y-%m-%d %H%M",
-)
-
-# Plain-text tooltip shown on hover over fire dots
-europe_df["tooltip_text"] = (
-    "Fire Detection — Date: "
-    + europe_df["acq_datetime"].dt.strftime("%Y-%m-%d %H:%M")
-)
-
-europe_df = assign_colors(europe_df)
-
-# ── Spain-only subset for KPIs ────────────────────────────────────────────────
-spain_df    = filter_spain(europe_df)
 total_fires = len(spain_df)
-fire_hash   = _hash_fire_df(spain_df)
 
-try:
-    eco_fires = compute_eco_fires(fire_hash, spain_df)
-except Exception as exc:
-    st.error(f"Error processing ENP spatial layer: {exc}")
+if not spain_df.empty:
+    fire_hash = _hash_fire_df(spain_df)
+    try:
+        eco_fires = compute_eco_fires(fire_hash, spain_df)
+    except Exception as exc:
+        st.error(f"Error processing ENP spatial layer: {exc}")
+        eco_fires = 0
+
+    try:
+        pop_kpis = compute_population_kpis(fire_hash, spain_df)
+    except Exception as exc:
+        st.error(f"Error computing population KPIs: {exc}")
+        pop_kpis = {"exposed_pop": 0, "mean_density": 0.0}
+else:
     eco_fires = 0
-
-try:
-    pop_kpis = compute_population_kpis(fire_hash, spain_df)
-except Exception as exc:
-    st.error(f"Error computing population KPIs: {exc}")
     pop_kpis = {"exposed_pop": 0, "mean_density": 0.0}
+
+# ── UX-friendly status note when in off-season / no active fires ─────────────
+with hist_col:
+    if spain_df.empty:
+        st.markdown(
+            f"<div class='status-note'>"
+            f"No active fires detected in Spain for the selected dates — "
+            f"displaying 2026 cumulative burnt areas on the map "
+            f"(last recorded fire: <b>{_last_fire_date:%Y-%m-%d}</b>)."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+    elif _last_fire_date < _yesterday and to_date == _last_fire_date:
+        st.markdown(
+            f"<div class='status-note'>"
+            f"No active fires today — calendar set to the last recorded fire "
+            f"(<b>{_last_fire_date:%Y-%m-%d}</b>)."
+            f"</div>",
+            unsafe_allow_html=True,
+        )
 
 # ── EFFIS burnt-area KPI ──────────────────────────────────────────────────────
 effis_gdf = fetch_effis_burnt_areas()
@@ -690,11 +826,10 @@ effis_total_ha = 0.0
 effis_count = 0
 if effis_gdf is not None and not effis_gdf.empty:
     effis_count = len(effis_gdf)
-    for candidate in ["AREA_HA", "AREA", "area_ha"]:
-        if candidate in effis_gdf.columns:
-            numeric_area = pd.to_numeric(effis_gdf[candidate], errors="coerce").fillna(0.0)
-            effis_total_ha = float(numeric_area.sum())
-            break
+    area_col = _first_matching_col(effis_gdf, _EFFIS_AREA_COLS)
+    if area_col:
+        numeric_area = pd.to_numeric(effis_gdf[area_col], errors="coerce").fillna(0.0)
+        effis_total_ha = float(numeric_area.sum())
 
 # ── KPIs, Legend & Layers (right column) ──────────────────────────────────────
 with map_col:
@@ -731,7 +866,7 @@ with map_col:
             options=["Protected Areas", "Population"],
             default=[],
             label_visibility="collapsed",
-            placeholder="Add layers..."
+            placeholder="Add layers...",
         )
         show_enp = "Protected Areas" in selected_layers
         show_pop = "Population" in selected_layers
@@ -739,20 +874,21 @@ with map_col:
 # ── Build map layers ──────────────────────────────────────────────────────────
 layers: list[pdk.Layer] = []
 
-# Fire scatter dots (always shown)
-layers.append(
-    pdk.Layer(
-        "ScatterplotLayer",
-        data=europe_df,
-        get_position="[longitude, latitude]",
-        get_fill_color="color_rgba",
-        get_radius=1000,
-        radius_min_pixels=4,
-        radius_max_pixels=8,
-        pickable=True,
-        filled=True,
+# Fire scatter dots (shown whenever active detections exist in the window)
+if not europe_df.empty:
+    layers.append(
+        pdk.Layer(
+            "ScatterplotLayer",
+            data=europe_df,
+            get_position="[longitude, latitude]",
+            get_fill_color="color_rgba",
+            get_radius=1000,
+            radius_min_pixels=4,
+            radius_max_pixels=8,
+            pickable=True,
+            filled=True,
+        )
     )
-)
 
 # Protected natural areas (green polygons)
 if show_enp:
@@ -772,8 +908,8 @@ if show_enp:
         )
 
 # EFFIS burnt areas (dark red polygons — always shown)
-if effis_gdf is not None and not effis_gdf.empty:
-    effis_geojson = json.loads(effis_gdf.to_json())
+effis_geojson = build_effis_geojson()
+if effis_geojson is not None:
     layers.insert(
         0,
         pdk.Layer(
@@ -819,20 +955,24 @@ if show_pop:
 with hist_col:
     if effis_gdf is not None and not effis_gdf.empty:
         st.markdown("#### Monthly Burnt Area (2026)")
-        date_c = next((c for c in ["FIREDATE", "INITIALDATE", "INIT_DATE"] if c in effis_gdf.columns), None)
-        area_c = next((c for c in ["AREA_HA", "AREA", "area_ha"] if c in effis_gdf.columns), None)
+        date_c = _first_matching_col(effis_gdf, _EFFIS_DATE_COLS)
+        area_c = _first_matching_col(effis_gdf, _EFFIS_AREA_COLS)
 
         if date_c and area_c:
-            chart_df = effis_gdf.copy()
-            chart_df["Month"] = pd.to_datetime(chart_df[date_c]).dt.month_name()
-            chart_df["Month_Num"] = pd.to_datetime(chart_df[date_c]).dt.month
+            chart_df = effis_gdf[[date_c, area_c]].copy()
+            parsed_dates = pd.to_datetime(chart_df[date_c], errors="coerce")
+            chart_df["Month"] = parsed_dates.dt.month_name()
+            chart_df["Month_Num"] = parsed_dates.dt.month
 
             # Ensure area is numeric before summing
             chart_df[area_c] = pd.to_numeric(chart_df[area_c], errors="coerce").fillna(0.0)
 
             # Sum up area_ha by month
-            monthly = chart_df.groupby(["Month_Num", "Month"], as_index=False)[area_c].sum()
-            monthly = monthly.sort_values("Month_Num")
+            monthly = (
+                chart_df.groupby(["Month_Num", "Month"], as_index=False)[area_c]
+                .sum()
+                .sort_values("Month_Num")
+            )
 
             # Format Y-axis for better readability
             monthly["Area (x1000 ha)"] = monthly[area_c] / 1000.0
@@ -860,12 +1000,12 @@ with hist_col:
                 )
                 .properties(
                     height=400,
-                    padding={"top": 20, "left": 15, "right": 15, "bottom": 30}
+                    padding={"top": 20, "left": 15, "right": 15, "bottom": 30},
                 )
                 .configure_view(stroke=None, fill="#F0F2F6")
                 .configure(background="#F0F2F6")
             )
-            st.altair_chart(bar_chart_obj, use_container_width=True, theme=None)
+            st.altair_chart(bar_chart_obj, width="stretch", theme=None)
         else:
             st.info("Monthly data not available.")
     else:
@@ -884,24 +1024,6 @@ with hist_col:
     )
 
 # ── Map Rendering (Right Column) ──────────────────────────────────────────────
-# Inject CSS so the pydeck iframe fills available height on all screen sizes.
-# On desktop the right column stretches to the viewport; on mobile (< 768 px)
-# Streamlit stacks columns vertically so we force a min-height via vh units.
-st.markdown("""
-<style>
-/* Target the iframe that pydeck injects */
-[data-testid="stDeckGlJsonChart"] iframe {
-    min-height: 480px;
-}
-@media (max-width: 768px) {
-    [data-testid="stDeckGlJsonChart"] iframe {
-        min-height: 75vh !important;
-        height: 75vh !important;
-    }
-}
-</style>
-""", unsafe_allow_html=True)
-
 with map_col:
     st.pydeck_chart(
         pdk.Deck(
@@ -924,6 +1046,6 @@ with map_col:
                 },
             },
         ),
-        use_container_width=True,
+        width="stretch",
         height=600,
     )

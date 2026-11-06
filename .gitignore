@@ -9,6 +9,7 @@ __pycache__/
 
 # Streamlit config / secrets if sensitive
 .streamlit/secrets.toml
+cookies.txt
 
 # OS & Editor files
 .DS_Store

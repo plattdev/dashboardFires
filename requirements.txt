@@ -1,5 +1,6 @@
 # Direct dependencies only — transitive deps managed by pip.
 streamlit>=1.60       # Web-app framework (dashboard UI)
+altair>=6.0           # Declarative bar chart visualisation
 pandas>=3.0           # DataFrames, CSV parsing
 pydeck>=0.9           # 3D WebGL map rendering
 geopandas>=1.0        # Spatial joins, CRS reprojections (ENP layer)
