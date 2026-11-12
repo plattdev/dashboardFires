@@ -73,11 +73,11 @@ st.markdown(
     f"""
     <div style="background-color: #2b303c; color: white; padding: 12px 18px; border-radius: 8px; margin-bottom: 15px; border-left: 5px solid #FF4B4B; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
         <div>
-            <strong>🚀 Esta aplicación se ha trasladado a una infraestructura 24/7 sin tiempos de espera.</strong>
-            <p style="margin: 3px 0 0 0; font-size: 0.85em; opacity: 0.85;">Si tu navegador no te ha redirigido automáticamente en unos segundos, haz clic en el botón:</p>
+            <strong>🚀 This dashboard has moved to an always-on 24/7 infrastructure with zero wake-up delays.</strong>
+            <p style="margin: 3px 0 0 0; font-size: 0.85em; opacity: 0.85;">If your browser does not redirect you automatically in a few seconds, please click the button:</p>
         </div>
         <a href="{FLY_URL}" target="_top" style="background-color: #FF4B4B; color: white; padding: 8px 18px; text-decoration: none; border-radius: 6px; font-weight: bold; white-space: nowrap; font-size: 0.9em;">
-            Ir a la nueva versión ➔
+            Open Live Version ➔
         </a>
     </div>
     """,
