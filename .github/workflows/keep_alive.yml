@@ -2,8 +2,8 @@ name: Keep Streamlit App Awake
 
 on:
   schedule:
-    # Runs every 12 hours to prevent Streamlit Community Cloud hibernation
-    - cron: '0 */12 * * *'
+    # Runs every 6 hours to keep the legacy Streamlit Cloud link awake
+    - cron: '0 */6 * * *'
   workflow_dispatch: # Allows manual trigger from GitHub UI if needed
 
 jobs:
@@ -41,6 +41,7 @@ jobs:
               page = context.new_page()
               print(f"Navigating to {url}...")
               page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+              page.wait_for_timeout(5_000)
 
               # Click the Streamlit Cloud wake-up button if the app is hibernating
               wake_btn = page.locator(
@@ -48,18 +49,27 @@ jobs:
                   '[data-testid="wakeup-button-viewer"]'
               )
               try:
-                  if wake_btn.first.is_visible(timeout=10_000):
+                  if wake_btn.first.is_visible(timeout=8_000):
                       print("App is hibernating — clicking wake-up button...")
                       wake_btn.first.click()
               except PlaywrightTimeoutError:
                   pass
 
-              # Wait for the Streamlit app container & WebSocket stream to connect
-              page.locator('[data-testid="stAppViewContainer"]').wait_for(
-                  state="visible", timeout=90_000
+              # Streamlit Community Cloud renders the app inside an iframe,
+              # while direct Streamlit renders in the main document. Check both.
+              combined = page.locator(
+                  '[data-testid="stAppViewContainer"], iframe[title="streamlitApp"]'
               )
+              combined.first.wait_for(state="visible", timeout=90_000)
+
+              # If inside an iframe, wait for the inner app container to mount
+              if page.locator('iframe[title="streamlitApp"]').count() > 0:
+                  inner = page.frame_locator('iframe[title="streamlitApp"]').first.locator(
+                      '[data-testid="stAppViewContainer"]'
+                  )
+                  inner.wait_for(state="visible", timeout=90_000)
+
               page.wait_for_timeout(5_000)
               print("Streamlit app is awake and rendered successfully.")
               browser.close()
           EOF
-

@@ -44,6 +44,27 @@ logger = logging.getLogger(__name__)
 # Must be the very first Streamlit command in the script.
 st.set_page_config(page_title="Spanish Wildfire Tracker", layout="wide")
 
+# ── Redirección automática desde Streamlit Cloud hacia Fly.io ─────────────────
+# Si un reclutador accede desde el enlace antiguo de tu CV (dashboardfires.streamlit.app),
+# se redirige inmediatamente a la versión rápida 24/7 de Fly.io.
+st.markdown("""
+<script>
+    (function() {
+        try {
+            var host = window.top.location.hostname;
+            if (host.includes("streamlit.app")) {
+                window.top.location.replace("https://spanish-wildfire-tracker.fly.dev/");
+            }
+        } catch (e) {
+            // Si el iframe bloquea el acceso a window.top, redirige el frame actual
+            if (window.location.hostname.includes("streamlit.app")) {
+                window.location.replace("https://spanish-wildfire-tracker.fly.dev/");
+            }
+        }
+    })();
+</script>
+""", unsafe_allow_html=True)
+
 # ── All CSS in a single block ─────────────────────────────────────────────────
 # Consolidated from previously scattered st.markdown(<style>) calls to avoid
 # specificity conflicts and make the stylesheet easy to maintain.
@@ -200,6 +221,7 @@ span[data-baseweb="tag"] {
 # ── Constants ─────────────────────────────────────────────────────────────────
 DATA_DIR = Path("data")
 POPULATION_TIFF = DATA_DIR / "SpainPopulation2026_CN_100m_R2025A_v1.tif"
+POPULATION_PARQUET = DATA_DIR / "spain_population_1km.parquet"
 EFFIS_PARQUET = DATA_DIR / "effis_burnt_areas_2026.parquet"
 _CURRENT_YEAR = datetime.date.today().year
 
@@ -245,8 +267,9 @@ def load_enp_geodataframes() -> dict[str, gpd.GeoDataFrame]:
     projected CRS are required later for accurate distance-based spatial joins.
     """
     files = {"canarias": "Enp2025_c.parquet", "peninsula": "Enp2025_p.parquet"}
+    cols = ["SITE_NAME", "ODESIGNATE", "geometry"]
     return {
-        key: gpd.read_parquet(DATA_DIR / fname)
+        key: gpd.read_parquet(DATA_DIR / fname, columns=cols)
         for key, fname in files.items()
         if (DATA_DIR / fname).exists()
     }
@@ -290,12 +313,15 @@ def build_enp_geojson() -> dict | None:
 
 @st.cache_data(show_spinner=False)
 def load_population_heatmap_data() -> pd.DataFrame | None:
-    """Load the WorldPop raster, downsample to ~1 km, return a DataFrame.
+    """Load the ~1 km downsampled WorldPop grid (lat, lon, population).
 
-    Uses rasterio's decimated read so the full 93 MB raster is never held
-    in memory at full resolution.  Returns columns: lat, lon, population.
-    Returns None if the TIFF file is missing.
+    Reads from the pre-aggregated parquet file first (~2.7 MB, <20 MB RAM) to
+    avoid decompressing the 523M-pixel GeoTIFF into memory on 512 MB VMs.
+    Falls back to downsampling the GeoTIFF on the fly if the parquet is absent.
     """
+    if POPULATION_PARQUET.exists():
+        return pd.read_parquet(POPULATION_PARQUET)
+
     if not POPULATION_TIFF.exists():
         return None
 
@@ -326,6 +352,39 @@ def load_population_heatmap_data() -> pd.DataFrame | None:
     })
 
 
+@st.cache_data(show_spinner=False)
+def build_population_heatmap_df() -> pd.DataFrame | None:
+    """Build a compact DataFrame (lon, lat, population) for PyDeck HeatmapLayer.
+
+    Aggregates the 485k-row 1 km grid onto a ~3 km (0.03°) visual grid so
+    pdk.Deck.to_json() produces a ~6 MB WebSocket payload (~173 MB RAM)
+    instead of a 63.5 MB payload (616 MB RAM that OOM-kills 512 MB VMs),
+    while keeping 100% of the 1 km grid intact for KPI calculations.
+    """
+    pop_df = load_population_heatmap_data()
+    if pop_df is None or pop_df.empty:
+        return None
+
+    hm = pop_df.copy()
+    hm["lat"] = (hm["lat"] / 0.03).round() * 0.03
+    hm["lon"] = (hm["lon"] / 0.03).round() * 0.03
+    hm = hm.groupby(["lat", "lon"], as_index=False)["population"].sum()
+    hm = hm[hm["population"] >= 5].copy()
+    hm["lat"] = hm["lat"].astype(np.float32).round(3)
+    hm["lon"] = hm["lon"].astype(np.float32).round(3)
+    hm["population"] = hm["population"].astype(np.float32).round(0)
+    return hm
+
+
+def _touch_safely(path: Path) -> None:
+    """Update file mtime if possible so failed refreshes don't retry on every rerun."""
+    try:
+        if path.exists():
+            path.touch()
+    except OSError:
+        pass
+
+
 def _refresh_effis_parquet(cache_path: Path) -> None:
     """Download the latest EFFIS current-season burnt-area shapefile and save to parquet."""
     url = (
@@ -341,14 +400,21 @@ def _refresh_effis_parquet(cache_path: Path) -> None:
     }
 
     try:
-        resp = requests.get(url, headers=headers, timeout=120)
+        try:
+            resp = requests.get(url, headers=headers, timeout=25)
+        except requests.exceptions.SSLError:
+            import urllib3
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            resp = requests.get(url, headers=headers, timeout=25, verify=False)
         resp.raise_for_status()
-        gdf = gpd.read_file(io.BytesIO(resp.content))
+        gdf = gpd.read_file(io.BytesIO(resp.content), bbox=(-19.0, 27.0, 4.5, 44.0))
     except Exception as exc:
         logger.warning("Could not refresh EFFIS data from WFS: %s", exc)
+        _touch_safely(cache_path)
         return
 
     if gdf.empty:
+        _touch_safely(cache_path)
         return
 
     # Filter for Spain
@@ -363,6 +429,7 @@ def _refresh_effis_parquet(cache_path: Path) -> None:
         gdf = gdf[gdf[date_col] >= f"{_CURRENT_YEAR}-01-01"]
 
     if gdf.empty:
+        _touch_safely(cache_path)
         return
 
     # Reproject to WGS-84 for PyDeck
@@ -1006,13 +1073,13 @@ if effis_geojson is not None:
 
 # Population heatmap (inserted at index 0 so it renders behind everything)
 if show_pop:
-    pop_df = load_population_heatmap_data()
-    if pop_df is not None and not pop_df.empty:
+    pop_hm_df = build_population_heatmap_df()
+    if pop_hm_df is not None and not pop_hm_df.empty:
         layers.insert(
             0,
             pdk.Layer(
                 "HeatmapLayer",
-                data=pop_df,
+                data=pop_hm_df,
                 get_position="[lon, lat]",
                 get_weight="population",
                 radiusPixels=35,

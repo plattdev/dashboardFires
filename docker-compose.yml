@@ -1,0 +1,20 @@
+# ═══════════════════════════════════════════════════════════════════
+#  Local development / testing only.
+#  Usage:  docker compose up --build
+#  Then:   http://localhost:8080
+# ═══════════════════════════════════════════════════════════════════
+
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - FIRMS_API_KEY=${FIRMS_API_KEY}
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8080/_stcore/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 45s
+      retries: 3
+
