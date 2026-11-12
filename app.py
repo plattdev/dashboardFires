@@ -36,6 +36,7 @@ import requests                        # HTTP client for downloading EFFIS burnt
 from rasterio.enums import Resampling  # resampling strategy when downscaling the raster
 from scipy.spatial import cKDTree      # fast spatial proximity queries for population KPIs
 import streamlit as st                 # the web-app framework that runs everything
+import streamlit.components.v1 as components  # for client-side JS redirect
 
 logger = logging.getLogger(__name__)
 
@@ -45,25 +46,43 @@ logger = logging.getLogger(__name__)
 st.set_page_config(page_title="Spanish Wildfire Tracker", layout="wide")
 
 # ── Redirección automática desde Streamlit Cloud hacia Fly.io ─────────────────
-# Si un reclutador accede desde el enlace antiguo de tu CV (dashboardfires.streamlit.app),
-# se redirige inmediatamente a la versión rápida 24/7 de Fly.io.
-st.markdown("""
+# Streamlit Cloud ejecuta el código dentro de un iframe sandboxed.
+# Usamos components.html para ejecutar JS real que redirija la ventana principal (window.top)
+# y añadimos un banner visual por si el navegador bloquea la redirección automática por seguridad.
+FLY_URL = "https://spanish-wildfire-tracker.fly.dev/"
+
+redirect_js = f"""
 <script>
-    (function() {
-        try {
-            var host = window.top.location.hostname;
-            if (host.includes("streamlit.app")) {
-                window.top.location.replace("https://spanish-wildfire-tracker.fly.dev/");
-            }
-        } catch (e) {
-            // Si el iframe bloquea el acceso a window.top, redirige el frame actual
-            if (window.location.hostname.includes("streamlit.app")) {
-                window.location.replace("https://spanish-wildfire-tracker.fly.dev/");
-            }
-        }
-    })();
+    try {{
+        if (window.top.location.hostname.includes("streamlit.app")) {{
+            window.top.location.href = "{FLY_URL}";
+        }}
+    }} catch (e) {{
+        try {{
+            window.parent.location.href = "{FLY_URL}";
+        }} catch (err) {{
+            window.location.href = "{FLY_URL}";
+        }}
+    }}
 </script>
-""", unsafe_allow_html=True)
+"""
+components.html(redirect_js, height=0, width=0)
+
+# Banner visible de alta prioridad (por si el navegador bloquea la redirección JS)
+st.markdown(
+    f"""
+    <div style="background-color: #2b303c; color: white; padding: 12px 18px; border-radius: 8px; margin-bottom: 15px; border-left: 5px solid #FF4B4B; display: flex; justify-content: space-between; align-items: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1);">
+        <div>
+            <strong>🚀 Esta aplicación se ha trasladado a una infraestructura 24/7 sin tiempos de espera.</strong>
+            <p style="margin: 3px 0 0 0; font-size: 0.85em; opacity: 0.85;">Si tu navegador no te ha redirigido automáticamente en unos segundos, haz clic en el botón:</p>
+        </div>
+        <a href="{FLY_URL}" target="_top" style="background-color: #FF4B4B; color: white; padding: 8px 18px; text-decoration: none; border-radius: 6px; font-weight: bold; white-space: nowrap; font-size: 0.9em;">
+            Ir a la nueva versión ➔
+        </a>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ── All CSS in a single block ─────────────────────────────────────────────────
 # Consolidated from previously scattered st.markdown(<style>) calls to avoid
